@@ -1,0 +1,239 @@
+//Use this class for the Quote Group level Update
+//********************SWITCH off the CPQ trigger and run this Batch then enable it.
+global class dm_QuoteGroupBatch implements Database.Batchable<AggregateResult> {
+  // The batch job starts
+  global Iterable<AggregateResult> start(Database.BatchableContext bc){
+    
+ //QL - Line Level Total Update at Quote Group level
+ //Change the QUOTE flag as per need
+   String queryForQLNetTotalUpdate = 'SELECT count(Id), SBQQ__Quote__c,Quote_Group__c ' 
+               + ' FROM SBQQ__QuoteLine__c Group By SBQQ__Quote__c,Quote_Group__c,SBQQ__Quote__r.Dm_Check__c '  
+               + ' Having SBQQ__Quote__r.Dm_Check__c = true ';
+   
+    return new dmIterable(queryForQLNetTotalUpdate);
+  } 
+  
+  //executeQLTotal update at CPQ QL QLTotal
+  global void execute(Database.BatchableContext bc, List<sObject> scope){
+    List<SBQQ__QuoteLine__c> forUpdateQuoteLine = new List<SBQQ__QuoteLine__c>();
+    Set<String> qId = new Set<String>();
+    for(sObject sObj : scope) {
+      AggregateResult ar = (AggregateResult)sObj;
+        qId.add(String.ValueOf(ar.get('SBQQ__Quote__c')));
+      System.debug('>>>> COUNT : ' + ar.get('SBQQ__Quote__c'));
+    } 
+     //Total Update in QL table List<dm_Split_ForQLImport__c> qlForSegments //For Segment Update
+      Map<String,List<SBQQ__QuoteLine__c>> quoteToQlMap = new Map<String,List<SBQQ__QuoteLine__c>>(); 
+     List<SBQQ__QuoteLine__c> qlForTotalUpdate  = [SELECT Id,SBQQ__Quote__c ,dm_Old_Opp_Prod_Id__c,SBQQ__Product__c,dm_QGroupTotalForErrFix__c,SBQQ__NetTotal__c,Quote_Group__c 
+                                                   FROM SBQQ__QuoteLine__c where SBQQ__Quote__r.Dm_Check__c = true 
+                                                   and SBQQ__Quote__c in :qId];
+      for(SBQQ__QuoteLine__c ql : qlForTotalUpdate)
+      {
+          if(ql.SBQQ__Quote__c != null)
+          {
+              if(quoteToQlMap.containsKey(ql.SBQQ__Quote__c))
+              quoteToQlMap.get(ql.SBQQ__Quote__c).add(ql);
+              else 
+              quoteToQlMap.put(ql.SBQQ__Quote__c,new List<SBQQ__QuoteLine__c>{ql});
+          }
+      }
+      //Get the Quote Lines and set the total details
+      for(String quoteId : quoteToQlMap.keySet())   
+      {
+         List<SBQQ__QuoteLine__c> qls = quoteToQlMap.get(quoteId);
+         //Get the Product to QL map
+          Map<String,List<SBQQ__QuoteLine__c>> pdtToQLs = getProductToQL(qls);
+          if(pdtToQLs != null && pdtToQLs.size()>0)
+          {   
+              Map<String,Decimal> qlToTotal = new  Map<String,Decimal>();
+              for(String pdtIdWithDisc : pdtToQLs.keySet())
+              {
+                  List<SBQQ__QuoteLine__c> temp = pdtToQLs.get(pdtIdWithDisc);
+                  Decimal amount = 0;
+                  for(SBQQ__QuoteLine__c qlineForPdt : temp)
+                  {
+					 amount = amount + qlineForPdt.SBQQ__NetTotal__c;
+                  }
+                  qlToTotal.put(pdtIdWithDisc,amount);
+              }
+              for(String pdtIdWithDisc : pdtToQLs.keySet())
+              {
+                  List<SBQQ__QuoteLine__c> temp = pdtToQLs.get(pdtIdWithDisc);
+                  for(SBQQ__QuoteLine__c qlineForPdt : temp)
+                  {
+                      qlineForPdt.dm_QGroupTotalForErrFix__c = qlToTotal.get(pdtIdWithDisc);
+                      forUpdateQuoteLine.add(qlineForPdt);
+                  }
+                  
+              }
+                      
+                      
+          }
+          qls.clear();
+      }
+      if(forUpdateQuoteLine.size()>0)
+          Database.update(forUpdateQuoteLine);
+  }
+
+    
+  public static Map<String,List<SBQQ__QuoteLine__c >> getProductToQL(List<SBQQ__QuoteLine__c > qls)
+   {
+       Map<String,List<SBQQ__QuoteLine__c >> pdtToQL = new  Map<String,List<SBQQ__QuoteLine__c >>();
+       for(SBQQ__QuoteLine__c  ql : qls)
+       {
+          if(ql.SBQQ__NetTotal__c == null) return null;
+          //LicensePrice
+           
+          // if(pdtToQL.containsKey(ql.Product__c+'-'+ql.Id))//LicensePrice
+            if(pdtToQL.containsKey(ql.SBQQ__Product__c+'-'+ql.dm_Old_Opp_Prod_Id__c))//+'-'+ql.LicensePrice__c))//LicensePrice
+               pdtToQL.get(ql.SBQQ__Product__c+'-'+ql.dm_Old_Opp_Prod_Id__c).add(ql);//+'-'+ql.LicensePrice__c)
+            else pdtToQL.put(ql.SBQQ__Product__c+'-'+ql.dm_Old_Opp_Prod_Id__c,new List<SBQQ__QuoteLine__c >{ql});
+           
+       }
+       return pdtToQL;
+   }
+   
+  // The batch job finishes
+  global void finish(Database.BatchableContext bc){ }
+}
+@isTest
+public class dm_QuoteGroupBatchTes{
+    @testSetup
+static void setupData(){
+       
+    	//Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+    
+       //Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'pc1',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        insert objProduct;
+    
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+    
+         // Quote Creation
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        objQuote.DM_ErrorQuote__c = true;
+        insert objQuote;
+    
+    
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        
+        objQuoteLine.DM_QuoteLine__c=true;
+        objQuoteLine.DM_ErrorQL__c=false;
+        objQuoteLine.SBQQ__Quote__c=objQuote.Id;
+        objQuoteLine.Quote_Group__c='1';
+        
+        insert objQuoteLine;
+    
+       	//Contract
+         Contract objContract = new Contract(
+            Status = 'Draft',
+            StartDate = objQuote.SBQQ__StartDate__c,
+            EndDate = objQuote.SBQQ__EndDate__c,
+            ContractTerm = 24,
+            AccountId = objQuote.SBQQ__Account__c, //objAccount.Id,
+            SBQQ__Opportunity__c = objQuote.SBQQ__Opportunity2__c, //objOpportunity.Id,
+            SBQQ__Quote__c = objQuote.Id
+        );
+         insert objContract;
+    	
+        //SBQQ__Subscription__C
+        SBQQ__Subscription__c objSub = TestDataUtility.createSubscription(
+            10,
+            objPriceBookEntry.Product2Id, 
+            objQuote.SBQQ__Account__c, 
+            objQuoteLine.Id,
+            1,
+            10000.00,
+            10000.00,
+            10000.00,
+            10000.00,
+            10000.00,
+            10000.00,
+            10,
+            10,
+            System.today(),
+            System.today().addYears(1).addDays(-1),
+            null
+        );
+        insert objSub;
+    
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;     
+        
+}
+@isTest 
+    static void executeTest(){
+        Test.startTest();
+        dm_QuoteGroupBatch bc = new dm_QuoteGroupBatch();
+        Database.executeBatch(bc);
+        Test.stopTest();
+    }
+}

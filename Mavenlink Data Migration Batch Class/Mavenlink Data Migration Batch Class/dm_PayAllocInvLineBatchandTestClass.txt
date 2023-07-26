@@ -1,0 +1,225 @@
+//Get the Payment Allocations - queryPaymentForPayAllocation
+global class dm_PayAllocInvLineBatch implements Database.Batchable<AggregateResult> {
+  // The batch job starts
+  global Iterable<AggregateResult> start(Database.BatchableContext bc){
+    String queryPaymentForPayAllocation = 'Select count(Id),blng__Invoice__c,Zuora_Invoice_Number__c from blng__Payment__c '
+                     //+' group by blng__Invoice__c,Zuora_Invoice_Number__c,DM_Payment__c  '
+                     +' group by blng__Invoice__c,Zuora_Invoice_Number__c,DM_Payment__c,blng__Invoice__r.blng__Order__r.SBQQ__Quote__r.Manual_Fix__c  '
+                     +'  having DM_Payment__c = true and Zuora_Invoice_Number__c != null '
+                     + 'and blng__Invoice__r.blng__Order__r.SBQQ__Quote__r.Manual_Fix__c = true';//Manual fix
+    return new dmIterable(queryPaymentForPayAllocation);
+  } 
+ ///*******************Payment Allocations Create : *************************
+ //Once the Payments are created, need to get the Invoice Line Items with the Invoice number which 
+ //should match the Payments Invoice Number
+ //Generate the Values based on the Field Mapping excel to email then Load it.
+  //Get the Unique Invoice Number under the Payment 
+  global void execute(Database.BatchableContext bc, List<sObject> scope){
+    //Get the Group by records based on the Invoice and Invoice Number
+    List<dm_PayAllocInvLineTemp__c> forInsertAllocInvLi = new List<dm_PayAllocInvLineTemp__c>();
+    Map<String,List<dm_Invoice_InvoiceLine__c>> oppToInvExl = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+    Map<String,blng__Payment__c> invNumPaymentMap = new Map<String,blng__Payment__c>();
+    Set<String> invNumbers = new Set<String>();
+    Set<String> invoiceIds = new Set<String>();
+    for(sObject sObj : scope) {
+      AggregateResult ar = (AggregateResult)sObj;
+        invNumbers.add(String.ValueOf(ar.get('Zuora_Invoice_Number__c')));
+        invoiceIds.add(String.ValueOf(ar.get('blng__Invoice__c')));
+       // invNumInvMap.put(String.ValueOf(ar.get('Zuora_Invoice_Number__c')),String.ValueOf(ar.get('blng__Invoice__c')));
+     // System.debug('>>>> COUNT : ' + ar.get('Opportunity__c'));
+    }
+     //Get the Payment Records based on the invoice number inorder to get the ID
+     List<blng__Payment__c> payments = [Select Id, blng__Invoice__c, Zuora_Invoice_Number__c from blng__Payment__c 
+                        where DM_Payment__c = true and Zuora_Invoice_Number__c != null 
+                                       and  Zuora_Invoice_Number__c in :invNumbers
+                                       and blng__Invoice__c in :invoiceIds
+                                       and CreatedDate = today];//Manual fix
+      for(blng__Payment__c payment : payments)
+      {
+          if(! invNumPaymentMap.containsKey(payment.Zuora_Invoice_Number__c))
+          invNumPaymentMap.put(payment.Zuora_Invoice_Number__c,payment);
+      }
+     //Get the List of Opportunity Records and group it based on the Invoice Number
+     Map<String,List<blng__InvoiceLine__c>> invNumberToBlngInvLineMap = new Map<String,List<blng__InvoiceLine__c>>(); 
+     List<blng__InvoiceLine__c> blngInvLines  = [Select Id, blng__Invoice__c, blng__Invoice__r.Zuora_Invoice_Number__c,blng__Subtotal__c from 
+                                                           blng__InvoiceLine__c 
+                    								       Where DM_InvLine__c = true and blng__Invoice__r.DM_Invoice__c = true 
+                                                           and blng__Invoice__r.Zuora_Invoice_Number__c != null
+                                                           and blng__Invoice__r.Zuora_Invoice_Number__c in :invNumPaymentMap.keySet()
+                                                           and blng__Invoice__c in :  invoiceIds 
+                                                 		   and CreatedDate = today];//Manual fix
+      //Get the Billing Invoice Lines for the Invocie Numbers
+      for(blng__InvoiceLine__c invLine : blngInvLines)
+      {
+         if(invNumberToBlngInvLineMap.containsKey(invLine.blng__Invoice__r.Zuora_Invoice_Number__c))
+             invNumberToBlngInvLineMap.get(invLine.blng__Invoice__r.Zuora_Invoice_Number__c).add(invLine);
+         else 
+             invNumberToBlngInvLineMap.put(invLine.blng__Invoice__r.Zuora_Invoice_Number__c,new List<blng__InvoiceLine__c>{invLine});
+      }
+      //Prepare the list of records from Invocie Lines based on the Payments Invoice number
+      for(String invLiNumbr : invNumPaymentMap.keySet())
+      {//invNumberToBlngInvLineMap.keySet()
+         if(invNumberToBlngInvLineMap.containsKey(invLiNumbr))
+          {
+              System.debug('IN Contains:'+(invLiNumbr));
+              List<blng__InvoiceLine__c> temp = invNumberToBlngInvLineMap.get(invLiNumbr);
+              for(blng__InvoiceLine__c invLi : temp){
+                  //Create the Temp Allocation Table for bulk load
+                  dm_PayAllocInvLineTemp__c obj = new dm_PayAllocInvLineTemp__c();
+                  obj.Invoice_Line__c = invLi.Id; 
+                  obj.Amount__c = invLi.blng__Subtotal__c;
+                  obj.Payment__c = invNumPaymentMap.get(invLiNumbr).Id;
+                  obj.Type__c = 'Allocation';
+                  obj.Zuora_Invoice_Number__c = invLiNumbr;
+                  forInsertAllocInvLi.add(obj);
+              }
+          }
+      }
+     if(forInsertAllocInvLi.size()>0)
+          Database.Insert(forInsertAllocInvLi);
+  }
+  // The batch job finishes
+  global void finish(Database.BatchableContext bc){ }
+}
+@isTest
+public class dm_PayAllocInvLineBatchTest {
+    @testSetup
+    static void setup(){
+        //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        // Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'pc1',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        insert objProduct;
+        
+        
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+        // Quote Creation
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.DM_Quote__c = True;
+        objQuote.Manual_Fix__c = true;
+        
+        insert objQuote;
+        
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+        
+        // blng__Invoice__c creation
+        blng__Invoice__c objBlngInvoice = TestDataUtility.createBlngInvoice(
+            objAccount.Id,
+            objOrder.Id
+        );
+        objBlngInvoice.Invoice_Admin_Status__c = 'Active';
+        objBlngInvoice.Product_Category__c = 'Licenses';
+        objBlngInvoice.Custom_Invoice_Date__c = Date.today().addDays(-1);
+        objBlngInvoice.blng__InvoiceDate__c = Date.today().addDays(-1);
+        objBlngInvoice.Product_Categories__c = 'Licenses';
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Zuora_Invoice_Number__c = '12345';
+        objBlngInvoice.DM_Invoice__c = true;
+        insert objBlngInvoice;
+        
+        //blng__InvoiceLine__c creation
+        
+        blng__InvoiceLine__c objBlngInvoiceLine = new blng__InvoiceLine__c();
+        objBlngInvoiceLine.blng__Invoice__c = objBlngInvoice.Id ; 
+        objBlngInvoiceLine.blng__Subtotal__c = 5700;
+        objBlngInvoiceLine.DM_InvLine__c = true;
+        insert objBlngInvoiceLine;
+        
+        //blng__Payment__c creation
+        blng__Payment__c bpayment = new blng__Payment__c();
+        bpayment.blng__Account__c = objAccount.Id;
+        bpayment.blng__Invoice__c = objBlngInvoice.Id;
+        bpayment.blng__PaymentType__c = 'Cash';
+        bpayment.blng__PaymentDate__c = system.today();        
+        bpayment.Zuora_Invoice_Number__c = '12345';
+        bpayment.DM_Payment__c = True;
+        bpayment.blng__Amount__c = 100;
+        
+        
+        insert bpayment;
+        
+        
+    } 
+    @isTest 
+    public static void test(){
+        Test.startTest();
+        dm_PayAllocInvLineBatch dmpaILB = new dm_PayAllocInvLineBatch();
+        Id batchId = Database.executeBatch(dmpaILB);
+        Test.stopTest();
+    }
+}

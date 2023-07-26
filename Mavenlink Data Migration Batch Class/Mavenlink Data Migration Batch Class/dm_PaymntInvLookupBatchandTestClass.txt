@@ -1,0 +1,246 @@
+//Update Invoice Id
+public class dm_PaymntInvLookupBatch implements Database.Batchable<sObject>,Database.Stateful {
+public static final String LICENSES_PRODUCT_CATEGORY = 'Licenses'; 
+   public database.querylocator start(Database.BatchableContext BC)
+  {
+     String queryPaymentExcel = 'Select Id,Invoice__c,Account__c,Account_CRM_Account_ID__c,Zuora_Invoice_Number__c from dm_Zuora_Payment__c where Account_CRM_Account_ID__c != null and Account__c != null and Zuora_Invoice_Number__c != null ';//and Invoice__c = null';//Account__c = null';
+     return Database.getQueryLocator(queryPaymentExcel);
+  }
+  public void execute(Database.BatchableContext BC,List<dm_Zuora_Payment__c>  payExl)
+	{
+      updatePaymentExcelInvoiceLookups(payExl);//Line items CPQ Prod Name,Prod Id update
+    }
+     //Payment Lookup update - Invoice Id
+   public static void updatePaymentExcelInvoiceLookups(List<dm_Zuora_Payment__c> payExl)
+  {
+     //Updat the Invoice Id based on the Invoice Number and Opportunity
+    List<dm_Zuora_Payment__c> forUpdatePayExl = new List<dm_Zuora_Payment__c>();
+    //Account to Payments
+    Map<String,List<dm_Zuora_Payment__c>> accInvNumToPayExl = new Map<String,List<dm_Zuora_Payment__c>>();
+    Map<String,blng__Invoice__c> accInvNumToBillingInv = new Map<String,blng__Invoice__c>();
+    Set<String> accIds = new Set<String>();
+     /* For 15 digit Acc Id
+    for(dm_Zuora_Payment__c pay : payExl) {
+      accIds.add(pay.Account__c.to15());
+        
+      if (accInvNumToPayExl.containsKey(pay.Account__c+'-'+pay.Zuora_Invoice_Number__c))
+          accInvNumToPayExl.get(pay.Account__c.to15()+'-'+pay.Zuora_Invoice_Number__c).add(pay);
+        else accInvNumToPayExl.put(pay.Account__c.to15()+'-'+pay.Zuora_Invoice_Number__c,new List<dm_Zuora_Payment__c>{pay});
+    }*/
+    //For 18 digit Account Id
+    for(dm_Zuora_Payment__c pay : payExl) {
+      //accIds.add(pay.Account__c.to15());
+        accIds.add(pay.Account__c);
+        
+      if (accInvNumToPayExl.containsKey(pay.Account__c+'-'+pay.Zuora_Invoice_Number__c))
+          accInvNumToPayExl.get(pay.Account__c+'-'+pay.Zuora_Invoice_Number__c).add(pay);
+        else accInvNumToPayExl.put(pay.Account__c+'-'+pay.Zuora_Invoice_Number__c,new List<dm_Zuora_Payment__c>{pay});
+    }
+     //Get the List of Opportunity Records and group it based on the Invoice Number
+     Map<String,List<dm_Invoice_InvoiceLine__c>> invNumberToInvExlMap = new Map<String,List<dm_Invoice_InvoiceLine__c>>(); 
+     //Get the Billing Invoices
+      List<blng__Invoice__c> billingInvList = [Select Id,blng__Account__c,Opportunity__c,Zuora_Invoice_Number__c from blng__Invoice__c where
+                                               blng__Account__c in :accIds and 
+                                               DM_Invoice__c =true]; //No Manual Fix];
+                                               //and CreatedDate = today];//Manual Fixs
+      //Opp To Billing Inv Map with Zuora Invoice Number
+      /* 15 Digit
+      for(blng__Invoice__c inv : billingInvList)
+      {
+          System.debug('Blng contains:'+(inv.blng__Account__c+'-'+inv.Zuora_Invoice_Number__c));
+          if(! accInvNumToBillingInv.containsKey(inv.blng__Account__c.to15()+'-'+inv.Zuora_Invoice_Number__c))
+              accInvNumToBillingInv.put(inv.blng__Account__c.to15()+'-'+inv.Zuora_Invoice_Number__c,inv);
+      }*/
+      //18 Digit
+      for(blng__Invoice__c inv : billingInvList)
+      {
+          System.debug('Blng contains:'+(inv.blng__Account__c+'-'+inv.Zuora_Invoice_Number__c));
+          if(! accInvNumToBillingInv.containsKey(inv.blng__Account__c+'-'+inv.Zuora_Invoice_Number__c))
+              accInvNumToBillingInv.put(inv.blng__Account__c+'-'+inv.Zuora_Invoice_Number__c,inv);
+      }
+      //Map the Inv Id to InvExcel using the Account Id and Inv Number
+      for(String accInvNumber : accInvNumToPayExl.keySet())
+      {
+          //System.debug('Contains:'+(payObj.Opportunity__c+'-'+payObj.Invoice_Invoice_Number__c));
+          if(accInvNumToBillingInv.containsKey(accInvNumber))
+          {
+              //Get the Payments for the Account and Invoice Number records - it may have more than one -Processed,Error,Cancelled
+              //System.debug('IN Contains:'+(payObj.blng__Account__c+'-'+payObj.Invoice_Invoice_Number__c));
+              List<dm_Zuora_Payment__c> temp = accInvNumToPayExl.get(accInvNumber);
+              for(dm_Zuora_Payment__c payObj : temp){
+              payObj.Invoice__c = accInvNumToBillingInv.get(accInvNumber).Id;//payObj.Account__c+'-'+payObj.Zuora_Invoice_Number__c).Id;
+              forUpdatePayExl.add(payObj);
+              }
+          }
+      }
+      for(String accInv :accInvNumToBillingInv.keySet())
+      {
+          if(! accInvNumToPayExl.containsKey(accInv))
+          System.debug('Billing accInvNumber:'+accInv);
+      }
+      System.debug('forUpdatePayExl Size:'+forUpdatePayExl.size());
+      if(forUpdatePayExl.size()>0)
+          Database.Update(forUpdatePayExl);
+  }
+
+    // The batch job finishes
+  public void finish(Database.BatchableContext bc){ }
+
+}
+@isTest
+public class dm_PaymntInvLookupBatchTest {
+   @testSetup
+    static void setup(){
+        //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        
+        List<Account> accId = [Select Id from Account where Name = 'Test Account' limit 1];
+        
+        // Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'pc1',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        insert objProduct;
+        
+        
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+        // Quote Creation
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.DM_Quote__c = True;
+        objQuote.Manual_Fix__c = true;
+        
+        insert objQuote;
+        
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+        
+        // blng__Invoice__c creation
+        blng__Invoice__c objBlngInvoice = TestDataUtility.createBlngInvoice(
+            objAccount.Id,
+            objOrder.Id
+        );
+        objBlngInvoice.Invoice_Admin_Status__c = 'Active';
+        objBlngInvoice.Product_Category__c = 'Licenses';
+        objBlngInvoice.Custom_Invoice_Date__c = Date.today().addDays(-1);
+        objBlngInvoice.blng__InvoiceDate__c = Date.today().addDays(-1);
+        objBlngInvoice.Product_Categories__c = 'Licenses';
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Zuora_Invoice_Number__c = 'INV00005914';
+        objBlngInvoice.DM_Invoice__c = true;
+        objBlngInvoice.Opportunity__c = objOpportunity.Id;
+        objBlngInvoice.blng__Account__c = accId[0].Id.to15();
+        insert objBlngInvoice;
+        
+        
+        //blng__InvoiceLine__c creation
+        
+        blng__InvoiceLine__c objBlngInvoiceLine = new blng__InvoiceLine__c();
+        objBlngInvoiceLine.blng__Invoice__c = objBlngInvoice.Id ; 
+        objBlngInvoiceLine.blng__Subtotal__c = 5700;
+        objBlngInvoiceLine.DM_InvLine__c = true;
+        insert objBlngInvoiceLine;
+        
+        //blng__Payment__c creation
+        blng__Payment__c bpayment = new blng__Payment__c();
+        bpayment.blng__Account__c = accId[0].Id;
+        bpayment.blng__Invoice__c = objBlngInvoice.Id;
+        bpayment.blng__PaymentType__c = 'Cash';
+        bpayment.blng__PaymentDate__c = system.today();        
+        bpayment.Zuora_Invoice_Number__c = 'INV00005914';
+        bpayment.DM_Payment__c = True;
+        bpayment.blng__Amount__c = 100;
+        
+        insert bpayment;
+        
+        //dm_Zuora_Payment__c creation
+        dm_Zuora_Payment__c ObjdmZuoraPayment = new dm_Zuora_Payment__c();
+        ObjdmZuoraPayment.Account_CRM_Account_ID__c = accId[0].Id ;
+        ObjdmZuoraPayment.Zuora_Invoice_Number__c = 'INV00005914';
+        ObjdmZuoraPayment.Account__c = objAccount.Id;
+        ObjdmZuoraPayment.Invoice__c = objBlngInvoice.Id;
+        
+        insert ObjdmZuoraPayment;
+
+    }
+    @isTest
+    public static void dm_PaymntInvLookupBatch1(){
+        Test.startTest();
+        dm_PaymntInvLookupBatch bc = new dm_PaymntInvLookupBatch();
+        Id batchId = Database.executeBatch(bc);
+        Test.stopTest();
+
+    } 
+    
+}

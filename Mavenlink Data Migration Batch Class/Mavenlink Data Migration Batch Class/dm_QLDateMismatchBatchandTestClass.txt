@@ -1,0 +1,222 @@
+//Validate Quote lines have same Start date and end date for all the products
+public class dm_QLDateMismatchBatch implements Database.Batchable<sObject>,Database.Stateful {
+//Validation
+public List<SBQQ__QuoteLine__c> qlWithDateConflict = new List<SBQQ__QuoteLine__c>();
+public database.querylocator start(Database.BatchableContext BC)
+{
+    String queryCPQQuote = 'Select Id,Name,SBQQ__Source__c,SBQQ__BillingFrequency__c,SBQQ__Opportunity2__c,SBQQ__Opportunity2__r.Name,SBQQ__Account__c,'
+        +'SBQQ__NetAmount__c ,SBQQ__SubscriptionTerm__c,SBQQ__StartDate__c,SBQQ__EndDate__c  from SBQQ__Quote__c where '
+        +' DM_Quote__c = true  ';//AND  Manual_Fix__c  = true';//DM_ErrorQuote__c = true and Manual_Fix__c  = true and SBQQ__Source__c != null
+    //Get the Quote Lines - and update the records with pro rate mismatch with Subscription term
+    String proRateQuoteLines = 'Select Id,Name,SBQQ__NetPrice__c,SBQQ__Quantity__c,dm_OldOppProd_TotalPrice__c,SBQQ__Quote__r.Id,SBQQ__Quote__r.Name,SBQQ__Product__r.Name,SBQQ__StartDate__c,SBQQ__EndDate__c,SBQQ__SegmentIndex__c,'+
+     					 ' SBQQ__Number__c,DM_ErrorQL__c,SBQQ__SegmentKey__c, SBQQ__SegmentLabel__c,SBQQ__NetTotal__c,'+
+                                        ' SBQQ__AdditionalDiscountAmount__c,dm_Old_Opp_Prod_Price_PerLine__c,dm_Before_ErrFix_DiscAmnt__c,dm_TempDiscAmtErrFix__c,dm_Old_Opp_Prod_Term__c,SBQQ__ListPrice__c,SBQQ__ProrateMultiplier__c,dm_Old_Opp_Prod_Id__c,SBQQ__SubscriptionTerm__c,SBQQ__Discount__c'+
+                                        ' from SBQQ__QuoteLine__c '+
+        				 +' where SBQQ__Quote__r.dm_Quote__c = true ';
+    String qlUpdate = 'SELECT Id, name,dm_OldOppProd_TotalPrice__c,SBQQ__NetTotal__c,SBQQ__Quote__r.Name, SBQQ__Quote__c,dm_QL_Update__c FROM SBQQ__QuoteLine__c WHERE  dm_OldOppProd_TotalPrice__c != null  ';
+    
+    String decimalCheckOppProd = 'Select Id,TOTALPRICE__c,Quote_Temp__c from dm_OpportunityProducts__c where '
+                                                     + 'dm_Product_Name_New__c != null '
+                              +' and dm_ProductId_New__c != null ';
+    return Database.getQueryLocator(queryCPQQuote);
+}
+ public void execute(Database.BatchableContext BC,List<SBQQ__Quote__c> quotes)
+{   
+    //Quote Validation
+    validateQuoteDates(quotes,qlWithDateConflict);
+}
+    //------------Validate Quotes
+    public static void validateQuoteDates(List<SBQQ__Quote__c> quotes,List<SBQQ__QuoteLine__c> qlWithDateConflict){
+        List<SBQQ__QuoteLine__c> forUpdate = new List<SBQQ__QuoteLine__c>();
+        Map<Id,SBQQ__Quote__c> qMap = new Map<Id,SBQQ__Quote__c>(quotes);
+        List<SBQQ__QuoteLine__c> qls = [Select Id,Name,SBQQ__StartDate__c,SBQQ__EndDate__c,SBQQ__Quote__r.Id,SBQQ__Quote__r.Name,SBQQ__Product__c,
+                                        SBQQ__Product__r.Name,
+                                        SBQQ__Quote__r.SBQQ__EndDate__c,SBQQ__Quote__r.SBQQ__StartDate__c from
+                                        SBQQ__QuoteLine__c where SBQQ__Quote__c in :qMap.keySet() 
+                                        ];
+        for(SBQQ__QuoteLine__c ql : qls)
+        {
+            //if(qMap.containsKey(ql.SBQQ__Quote__c))
+            if(ql.SBQQ__EndDate__c > ql.SBQQ__Quote__r.SBQQ__EndDate__c)
+                qlWithDateConflict.add(ql);
+        }
+    }
+    //End
+    //Validate Amount
+   public static void  sendEmailWithAttachment(List<SBQQ__QuoteLine__c> ql)
+  {
+        String subject = 'SandBox Quote Lines Date Conflict with Quote';
+        String body = 'Quote Lines Conflict Dates';
+        // Define the email
+        Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();  
+        // Define email file attachment list
+        Messaging.EmailFileAttachment[] emailAttList = new List<Messaging.EmailFileAttachment>();
+        // Creating the CSV file 
+         if(! ql.isEmpty()){
+            // Creating the CSV file for error
+            String finalstr = 'Id,Name,Start Date,End Date,QId,QName,ProductName,ProductId,ProductName,Quote StartDate,Quote EndDate\n';
+            String attName = 'QL_WithMismatchDates_' + system.now().format('YYYYMMDDhhmm') + '.csv';
+            for(SBQQ__QuoteLine__c  q  : ql){
+				string recordString =  q.Id+'","'+q.Name+'","'+q.SBQQ__StartDate__c +'","'+ q.SBQQ__StartDate__c+'","'+q.SBQQ__Quote__c+'","'+
+                						q.SBQQ__Quote__r.Name+'","'+q.SBQQ__Product__c+'","'+q.SBQQ__Product__r.Name+'","'+
+                						q.SBQQ__Quote__r.SBQQ__StartDate__c +'","'+
+                                       q.SBQQ__Quote__r.SBQQ__EndDate__c+'"\n';
+                finalstr = finalstr +recordString;
+            }
+        
+    		// Create the email attachment    
+            Messaging.EmailFileAttachment efa = new Messaging.EmailFileAttachment();
+            efa.setFileName(attName);
+            efa.setBody(Blob.valueOf(finalstr));
+            emailAttList.add(efa);
+       		} 
+            
+         // Sets the paramaters of the email
+         email.setSubject( subject );
+        //Need to get the List
+        List<User> userList = new List<User>();
+        List<String> toAddresses = new List<String>();
+       	toAddresses.add('revathi.mohan@nteligroup.com');//nageswaran.athithya@nteligroup.com');//-------------------TO DO
+      	//toAddresses.add('dipa.rathod@nteligroup.com');  
+      	//toAddresses.add('charumathi@nteligroup.com'); 
+      	email.setToAddresses( toAddresses);
+        email.setPlainTextBody( body );
+        email.setFileAttachments(emailAttList);
+          
+        // Sends the email
+        Messaging.SendEmailResult [] r =
+        Messaging.sendEmail(new Messaging.SingleEmailMessage[] {email});
+    }
+public void finish(Database.BatchableContext BC)
+ {
+     //Error
+     if(qlWithDateConflict.size()>0)
+     sendEmailWithAttachment(qlWithDateConflict);
+ }
+}
+@isTest
+public class dm_QLDateMismatchBatchTest {
+	@testsetup
+    Static void setup(){
+           //Account Creation
+       Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+		// Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'pc1',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        insert objProduct;
+        
+        
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+		// Quote Creation
+		
+        SBQQ__Quote__c objQuote1 = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+		objQuote1.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote1.DM_Quote__c = True;
+        
+        insert objQuote1;
+
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+		objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.DM_Quote__c = True;
+        objQuote.SBQQ__Source__c = objQuote1.Id;
+        
+        insert objQuote;
+        
+        
+		// QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(36)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        objQuoteLine.dm_OldOppProd_TotalPrice__c = 10000;
+        objQuoteLine.SBQQ__SegmentIndex__c = 1;
+        objQuoteLine.SBQQ__AdditionalDiscountAmount__c = 5;
+        objQuoteLine.dm_Old_Opp_Prod_Price_PerLine__c = 2000;
+        objQuoteLine.dm_Before_ErrFix_DiscAmnt__c = 5000;
+        objQuoteLine.dm_TempDiscAmtErrFix__c = 3;
+        objQuoteLine.dm_Old_Opp_Prod_Term__c = 24;
+        objQuoteLine.dm_Old_Opp_Prod_Id__c = objProduct.Id;
+        objQuoteLine.SBQQ__SubscriptionTerm__c = 24;
+        objQuoteLine.SBQQ__Discount__c = 100;
+        insert objQuoteLine;
+        
+        dm_OpportunityProducts__c objdmOppProd = new dm_OpportunityProducts__c();
+        objdmOppProd.TOTALPRICE__c = 10000;
+        objdmOppProd.Quote_Temp__c = objQuote.Id;
+        objdmOppProd.dm_Product_Name_New__c = 'Test Prod';
+        objdmOppProd.dm_ProductId_New__c = objProduct.Id;
+    }
+    @isTest
+    public static void dm_QLDateMismatchBatchTest1() {
+        Test.startTest();
+        dm_QLDateMismatchBatch bc = new dm_QLDateMismatchBatch();
+        database.executeBatch(bc);
+        Test.stopTest();
+    }
+}

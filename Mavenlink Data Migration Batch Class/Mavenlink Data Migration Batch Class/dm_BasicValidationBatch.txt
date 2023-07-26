@@ -1,0 +1,3022 @@
+//For new Opp Prod from Prod:
+/* Step 1: Map the Opportunity id from prod with Quote(dm_Quote=true)'s Opportunity Id.
+ * Step 2: Load the delta records into temp table dm_OpportunityProducts__c with From_Prod = true
+ * Step 3: Use this Batch apex Query:queryCPQQuote Function :updateQuoteLookupInOppProdExcel- update the Quote Id into those records.
+ * Step 4: Use this Batch Apex Query:queryLoadNewCPQProdsIdForQL  Function:updateProductLookupCPQProdForOppProd - to update the CPQ Product name and it's price for the above records
+ * Step 5: ---Use the Iterator batch- not this batch-Use this batch Apex Query:queryOppProdsForQL Function:splitLogicWithDiscountPriceForCPQ to create the dm_Split_ForQLImport__c records for Quote Lines with partial segment
+ * Step 6: Use this batch Apex Query:querySplitForQLImportForQLSegmentUpdate Function:setMDQLayoutForQLinTemp to update the dm_Split_ForQLImport__c records for Quote Lines with full segment
+ * TO DO Step 7: Use this batch Apex Query: Function: to update the SBQQ__Quote_Line__c records for Quote Lines for Miscalculations
+ * 
+ */
+/*****************Quote Creation - Disable SBQQ Trigger, *******Enable Finish here
+                              - And deactivate the Avatax V7 Process Builder,
+                                   PB - Update Quote fields Notification for Quote Approvals Status ”
+								   PB - Quote : Automatic Tax Calculation
+								   Flow - “UpdatePrimaryOppQuote”
+							  - Change the Queries 
+**********************************************
+*************Quote Line:**********************
+
+Pre Step :1.Quote Id update in Opp Prod Excel,2.Account,Contract,Opportunity Id lookup update
+          3.Missing CPQ Block Price Products Id Update:
+Pre Step : Get the Opp Prod count under Opportunity and update it in the Opp Prod Excel records.
+1.Generate Temp QL from the Opp Prod excel - change the query
+2.UPdate the Temp QL - for segmentation - MDQ ----Use the ********** dmQLSegmentUpdate ******* for Segment Update
+3.For top N Quotes and Quote Lines - change the query
+4.Get the exel in email for upload to QL
+5.Deactivate -
+ - Process Builder
+    1.Update Quote fields from Oppty and update Oppty fields from Quote
+    2.Version 7: Quote : Automatic Tax Calculation 
+    3.Automate Order and Contract Creation - Version 1
+    4.Notification for Quote Approvals Status 
+    5.Set Billing Frequency from Quote(updated)
+- Flow:
+	1.Initial Payment- V3 
+    2.UpdatePrimaryOppQuote-v1  
+    3.QuoteLineUpdate V4
+-------------Invoices & Invoice Lines---
+Invoice Cleanup - 
+I.Process Builder - 
+1.Update Invoice Record Type and 
+2.Account: Televerde Target Tracker
+II.Change the Posted Invoices into Draft and Cancelled (with CPQ Trigger off and on)
+III.Deactivate the Billing Trigger then delete wih data loader using the DM_Invoice flag recods.It automatically delete the Line items.
+Create - Invoices - Run this batch and get the data *******dm_InvoicesIteratorBatch*****
+Deactivate - 
+PB - 1.Process Builder - Update Customer Email Id's on Invoice
+Invoice Lines - Create -  Run this batch and get the data *******dm_InvoicesIteratorBatch*****
+------------------------------------------------
+------------------Payments ---------
+No need for any Deactivation
+-----------------------------------
+Payment Allocation Invocie Line
+--------------------------------
+*/
+//***************** 
+public class dm_BasicValidationBatch implements Database.Batchable<sObject>,Database.Stateful {
+public List<dm_Sanbox_Quote_For_Import__c> forInsertQuote = new List<dm_Sanbox_Quote_For_Import__c>();
+public List<dm_Split_ForQLImport__c> forInsertQuoteLine = new List<dm_Split_ForQLImport__c>();
+//Validation
+//Compare the Total
+public Map<SBQQ__Quote__c,Decimal> quoteToProdAmount = new Map<SBQQ__Quote__c,Decimal>(); 
+public List<SBQQ__QuoteLine__c> forUpdateQLWithNewPercent = new List<SBQQ__QuoteLine__c>();
+public Map<String,dm_OpportunityProducts__c> nonMatchedCPQProductNameTodmProdMap = new Map<String,dm_OpportunityProducts__c>();
+public static final String LICENSES_PRODUCT_CATEGORY = 'Licenses'; 
+public database.querylocator start(Database.BatchableContext BC)
+{
+    String queryAccLookup = 'Select Id,Name from Account';
+    String queryOppLookup = 'Select Id,Name from Opportunity';
+    String queryContract = 'Select Id from Contract';
+    String queryOrder = 'Select Id,Product_Category_Name__c,SBQQ__Quote__c from Order where SBQQ__Quote__r.DM_ErrorQuote__c = false and SBQQ__Quote__r.DM_Quote__c = true and Product_Category_Name__c = \'Licenses\'';
+    String queryZQuote = 'Select Id,Name,zqu__Number__c,zqu__Opportunity__c from zqu__Quote__c ';
+    String querydmProducts = 'Select Id,dm_Product_Name_New__c,Product__c,Product_Name__c,Opportunity_Name__c,Account_Name__c,Product_Code__c,Quantity__c,List_Price__c from dm_cpq_Product__c where '
+        +' Product_Name__c != null and Opportunity_Name__c != null and Account_Name__c != null and Quantity__c  != null and List_Price__c  != null and Product__c != null';
+    String querydmAccOppForOpp = 'Select Id,Opportunity_18_Digit_Id__c,Opportunity_Name__c from dm_cpq_Accounts_Opps__c where Opportunity_18_Digit_Id__c != null and Opportunity_Name__c != null and Opportunity__c != null';//and Opportunity__c = null';
+    String querydmAccOppForAcc = 'Select Id,Opportunity_18_Digit_Id__c,Opportunity_Name__c,Account__c from dm_cpq_Accounts_Opps__c where Opportunity_18_Digit_Id__c != null and Opportunity_Name__c != null and Account__c != null';
+	String querydmContractOrderForOpp = 'Select Id,Order_Start_Date__c,Order_End_Date__c,Term__c,'+
+        'Contract_Id__c,Contract__c,Order_Name__c from dm_cpq_Contracts_Orders__c where Order_Name__c != null '+
+        'and Contract_Id__c != null ';
+    //Quote 
+    String queryDMCpqQuote = 'Select Id,Account__c,Opportunity__c,Opportunity_Opportunity_18_Digit_Id__c,'
+                     +'Opportunity_Opportunity_Name__c,Payment_Term__c,dm_StartDate__c,dm_EndDate__c  from dm_cpq_Quote__c where '
+        			+'Opportunity_Opportunity_Name__c != null and Opportunity_Opportunity_18_Digit_Id__c != null ';//+
+                          //    ' and Opportunity__c = null';
+   //Quote Line creation - Opp Prod and update Split QL Temp
+   //Opportunity_Temp__c - is a look up field,Quote_Temp__c  lookup - Remove the Quote_Temp__c for other logic
+   String queryOppProdsForQL = 'Select Id,dm_Product_Name_New__c,dm_Opp_Prod_Count_for_Opp__c,dm_ProductId_New__c,Quote_Temp__c,DISCOUNT_AMOUNT_C__c,TOTALPRICE__c,Opportunity_Temp__c,Opportunity_Temp__r.Start_Date__c,'
+       					+'Opportunity_Temp__r.End_Date__c,LICENSE_PRICE_C__c,END_DATE_C__c,ACCOUNT_ID_C__c,OPPORTUNITYID__c,CONTRACT_ID_NEW_C__c,'
+       					+'START_DATE_C__c,Subscription_Term__c,OPPORTUNITY_NAME_C__c,PRODUCT_NAME_C__c,PC_1_C__c,TERM_C__c,LISTPRICE__c,OPPPRODID_C__c,PRODUCT2ID__c,QUANTITY__c,MONTHLY_RECURRING_REVENUE_C__c '
+       					+'from dm_OpportunityProducts__c where OPPORTUNITY_NAME_C__c != null and OPPORTUNITYID__c != null and ACCOUNT_ID_C__c != null'
+                        +' and dm_ProductId_New__c != null'//;
+       				    + ' and Quote_Temp__c != null';// and From_Prod__c = true and  (Quote_Temp__r.Name =\'Q-01852\' or Quote_Temp__r.Name =\'Q-01846\' or Quote_Temp__r.Name =\'Q-01856\')';//limit 10';//and TERM_C__c > 40 and TERM_C__c <= 100';
+   //Missing CPQ Prod in Excel
+   String queryLoadNewCPQProdsIdForQL = 'Select Id,dm_Product_Name_New__c,dm_ProductId_New__c,Quote_Temp__c,DISCOUNT_AMOUNT_C__c,TOTALPRICE__c,Opportunity_Temp__c,Opportunity_Temp__r.Start_Date__c,'
+       					+'Opportunity_Temp__r.End_Date__c,LICENSE_PRICE_C__c,END_DATE_C__c,ACCOUNT_ID_C__c,OPPORTUNITYID__c,CONTRACT_ID_NEW_C__c,'
+       					+'START_DATE_C__c,OPPORTUNITY_NAME_C__c,PRODUCT_NAME_C__c,PC_1_C__c,TERM_C__c,LISTPRICE__c,OPPPRODID_C__c,PRODUCT2ID__c,QUANTITY__c,MONTHLY_RECURRING_REVENUE_C__c '
+       					+'from dm_OpportunityProducts__c where dm_Product_Name_New__c = null'
+       				  //  + ' and Quote_Temp__c != null and dm_ProductId_New__c = null';//limit 10';//and TERM_C__c > 40 and TERM_C__c <= 100';
+   						+ '  and dm_ProductId_New__c = null and From_Prod__c = true';
+    String queryrToGetOppProdCountToVerifyQLLoad = 'Select Id,dm_Product_Name_New__c,dm_Opp_Prod_Count_for_Opp__c,dm_ProductId_New__c,Quote_Temp__c,DISCOUNT_AMOUNT_C__c,TOTALPRICE__c,Opportunity_Temp__c,Opportunity_Temp__r.Start_Date__c,'
+       					+'Opportunity_Temp__r.End_Date__c,LICENSE_PRICE_C__c,END_DATE_C__c,ACCOUNT_ID_C__c,OPPORTUNITYID__c,CONTRACT_ID_NEW_C__c,'
+       					+'START_DATE_C__c,OPPORTUNITY_NAME_C__c,PRODUCT_NAME_C__c,PC_1_C__c,TERM_C__c,LISTPRICE__c,OPPPRODID_C__c,PRODUCT2ID__c,QUANTITY__c,MONTHLY_RECURRING_REVENUE_C__c '
+       					+'from dm_OpportunityProducts__c where dm_Opp_Prod_Count_for_Opp__c = null';
+    //where  Quote__c =\'aCA7800000004YzGAI\' and or Quote__c =\'aCA7800000004YOGAY\' 
+    String querySplitForQLImportForQLSegmentUpdate = 'SELECT Id, Product__c,Product__r.Name, Quote__c,'
+                +'Opportunity_Product__c,'
+               + 'Quote_Group__c, SegmentKey__c, Number__c,ChargeType__c ' 
+               + ' FROM dm_Split_ForQLImport__c where Number__c = null and Quote_Group__c = null Order By Quote__c,Opportunity_Product__c ';// or Quote__c=\'';//ChargeType__c = \'One-Time\' ';//and (Quote__c = \'Q-01843\' or Quote__c=\'aCA7800000004XuGAI\')';//where SubscriptionTerm__c > 36 Limit 5';//where Quote__c = \'aCA7800000004bLGAQ\' Order By Quote__c,End_Date__c ';
+    String queryZuraCustomer = 'Select Id,Bill_To_Work_Email__c,Account_CRM_Account_ID__c from dm_Zuora_Customer__c where Account_CRM_Account_ID__c != null';
+    String queryCPQQuote = 'Select Id,Name,SBQQ__Source__c,SBQQ__BillingFrequency__c,SBQQ__Opportunity2__c,SBQQ__Opportunity2__r.Name,SBQQ__Account__c,'
+        +'SBQQ__NetAmount__c ,SBQQ__SubscriptionTerm__c,SBQQ__StartDate__c,SBQQ__EndDate__c  from SBQQ__Quote__c where '
+        +' DM_Quote__c = true  AND  Manual_Fix__c  = true';//DM_ErrorQuote__c = true and Manual_Fix__c  = true and SBQQ__Source__c != null
+    String remainingQuoteImport = 'SELECT Id, Payment_Term__c, Quote_Quote_Name__c, Opportunity_Billing_Frequency__c,'+
+        ' Number__c, Opportunity_Opportunity_18_Digit_Id__c, Opportunity_Opportunity_Name__c, Opportunity__c, Account__c,'+
+        ' dm_StartDate__c, Quote2__c, dm_EndDate__c, Contract__c, dm_BillToCustomerEmail__c FROM dm_cpq_Quote__c '+
+        'where Opportunity_Opportunity_18_Digit_Id__c != null and Contract__c != null and Opportunity__c != null and '+
+        ' Account__c != null and dm_EndDate__c != null and dm_StartDate__c != null';
+   //Get the Quote Lines - and update the records with pro rate mismatch with Subscription term
+    String proRateQuoteLines = 'Select Id,Name,SBQQ__NetPrice__c,SBQQ__Quantity__c,dm_OldOppProd_TotalPrice__c,SBQQ__Quote__r.Id,SBQQ__Quote__r.Name,SBQQ__Product__r.Name,SBQQ__StartDate__c,SBQQ__EndDate__c,SBQQ__SegmentIndex__c,'+
+     					 ' SBQQ__Number__c,DM_ErrorQL__c,SBQQ__SegmentKey__c, SBQQ__SegmentLabel__c,SBQQ__NetTotal__c,'+
+                                        ' SBQQ__AdditionalDiscountAmount__c,dm_Old_Opp_Prod_Price_PerLine__c,dm_Before_ErrFix_DiscAmnt__c,dm_TempDiscAmtErrFix__c,dm_Old_Opp_Prod_Term__c,SBQQ__ListPrice__c,SBQQ__ProrateMultiplier__c,dm_Old_Opp_Prod_Id__c,SBQQ__SubscriptionTerm__c,SBQQ__Discount__c'+
+                                        ' from SBQQ__QuoteLine__c '+
+        				 +' where SBQQ__Quote__r.dm_Quote__c = true '//and dm_ErrorQL__c = true and SBQQ__Quote__r.dm_ErrorQuote__c = true ' 
+                      //+ 'dm_Old_Opp_Prod_Id__c != null and dm_OldOppProd_TotalPrice__c != null and SBQQ__SubscriptionTerm__c != null and SBQQ__NetTotal__c != null and DM_QuoteLine__c = true ';
+                      //  + ' where SBQQ__Quote__r.dm_ErrorQuote__c = true 
+                       +' and dm_Old_Opp_Prod_Id__c != null and SBQQ__Quote__r.dm_ErrorQuote__c = true '
+                  +' and dm_OldOppProd_TotalPrice__c != null and SBQQ__SubscriptionTerm__c != null and SBQQ__NetTotal__c != null  '
+                  +' and DM_QuoteLine__c = true ';//and dm_Old_Opp_Prod_Term__c  = null ';//and SBQQ__Quote__r.Name=\'Q-07086\' ';//and SBQQ__ProrateMultiplier__c != null
+        //'Select Id,Name from SBQQ__QuoteLine__c where DM_QuoteLine__c = true';// and id = \'aCA7800000004YOGAY\'';
+    //Query to get the Back Up Opportunity Product Records to validate the logic.
+    //Query to update Quote lines
+    String qlUpdate = 'SELECT Id, name,dm_OldOppProd_TotalPrice__c,SBQQ__NetTotal__c,SBQQ__Quote__r.Name, SBQQ__Quote__c,dm_QL_Update__c FROM SBQQ__QuoteLine__c WHERE  dm_OldOppProd_TotalPrice__c != null  ';
+    String queryInvExcel = 'Select Id, Invoice__c,Opportunity__c,Product_Name__c,Product__c,ProductNameCPQ__c,Order__c,Quote__c,Invoice_Invoice_Number__c from dm_Invoice_InvoiceLine__c where Invoice_Invoice_Number__c != null and Opportunity__c != null and Quote__c != null';// and Order__c = null ';
+    String queryPaymentExcel = 'Select Id,Invoice__c,Account__c,Account_CRM_Account_ID__c,Zuora_Invoice_Number__c from dm_Zuora_Payment__c where Account_CRM_Account_ID__c != null and Account__c != null and Zuora_Invoice_Number__c != null ';//and Invoice__c = null';//Account__c = null';
+    //For Payment Allocation
+    String queryBlngInvLines = 'Select Id,blng__Invoice__c,blng__Subtotal__c,blng__Invoice__r.Zuora_Invoice_Number__c from blng__InvoiceLine__c where DM_InvLine__c = true and '
+                                + ' blng__Invoice__r.DM_Invoice__c = true and blng__Invoice__r.Zuora_Invoice_Number__c != null';
+    String decimalCheckOppProd = 'Select Id,TOTALPRICE__c,Quote_Temp__c from dm_OpportunityProducts__c where '
+                                                     + 'dm_Product_Name_New__c != null '
+                              +' and dm_ProductId_New__c != null ';
+    return Database.getQueryLocator(qlUpdate);//decimalCheckOppProd);//queryInvExcel);//queryZuraCustomer);//queryDMCpqQuote);//proRateQuoteLines);//queryBlngInvLines);//queryPaymentExcel);//queryInvExcel//queryrToGetOppProdCountToVerifyQLLoad);
+    //queryCPQQuote);//querySplitForQLImportForQLSegmentUpdate);//queryOppProdsForQL//queryLoadNewCPQProdsIdForQL
+}
+    ////Quote - queryDMCpqQuote -Opp Lookup - Opp Prod, then Acc lookup -Opp Prod.
+    //queryZuraCustomer - Then Update Customer Email from 
+    //----------End Load all
+  //-----------------   //SplitLogic - Insert the  quote lines with Opp Prod Id and the Line Total
+    //Opp Prod Count update in Opp PRod excel - List<dm_OpportunityProducts__c> oppProdCountForOpp
+    //Top N Quote   List<SBQQ__Quote__c> quotesTop10
+    /*Invocie 'aDG7800000004OgGAI','aDG7800000004OgGAI','aDG7800000004OlGAI','aDG7800000004OlGAI,'aDG7800000004P0GAI',
+'aDG7800000004P0GAI','aDG7800000004P5GAI','aDG7800000004P5GAI','aDG7800000004PAGAY','aDG7800000004PAGAY'
+     * */
+public void execute(Database.BatchableContext BC,List<SBQQ__QuoteLine__c> ql)//List<dm_OpportunityProducts__c> oppProdsExcel)//List<dm_Zuora_Payment__c> payExl)//List<SBQQ__Quote__c> quotes)//List<dm_Invoice_InvoiceLine__c> invExl)//List<SBQQ__Quote__c> quotes)//List<dm_OpportunityProducts__c> oppProdsExcel)//List<dm_Zuora_Customer__c> customersList)//List<dm_cpq_Quote__c> zQuote)//List<SBQQ__QuoteLine__c> qlForProRateFix)//quoteLinesError)//qlForProRateFix)//List<SBQQ__Quote__c> quotes)//List<SBQQ__QuoteLine__c> qlForProRateFix)//List<dm_cpq_Quote__c> zQuote)//List<SBQQ__QuoteLine__c> quoteLinesError)//List<SBQQ__QuoteLine__c> quoteLinesError)//List<blng__InvoiceLine__c> invLineForAlloc)//List<dm_Zuora_Payment__c> payExl)//List<dm_Invoice_InvoiceLine__c> invExl//List<SBQQ__QuoteLine__c> qlForProRateFix)//List<SBQQ__QuoteLine__c> qlForProRateFix)
+    //List<dm_Split_ForQLImport__c> qlForSegments)//List<dm_OpportunityProducts__c> oppProdsExcel)
+    //List<SBQQ__Quote__c> quotesTop10)List<SBQQ__Quote__c> quotes)//List<dm_OpportunityProducts__c> oppProdsExcel)
+    //List<dm_Zuora_Customer__c> customersList)//List<dm_cpq_Contracts_Orders__c> contOrdersList)
+    //List<dm_OpportunityProducts__c> oppProdList)//List<dm_cpq_Accounts_Opps__c> accoppList)//List<dm_cpq_Contracts_Orders__c> dmContractsOrdersList)//List<dm_cpq_Accounts_Opps__c> accoppList)
+    //List<dm_cpq_Product__c > dmProductsList//List<zqu__Quote__c> zQuoteList)// List<Order> orderList)//List<Contract> contractList)// List<Account> accList)//List<Opportunity> oppList)
+ {   //CPQ Account
+     //updateAccountLookup(accList);
+     //CPQ Opportunity
+     //updateOppLookup(oppList);
+     //CPQ Contract
+     //updateContractLookup(contractList);
+     //CPQ Order
+     //updateOrderLookup(orderList);
+     //CPQ Quote - Zuro quote
+     //updateZQuoteLookup(zQuoteList);
+     //Zuro Invoice- Account update
+     //updateAccountLookupInZuro(accList);
+     //Zuro Subscription Account Lookup
+     //updateAccountLookupZuroSub(accList);
+     //Zuro Subscription Opp Lookup based on Opp Names in Accounts and Opps
+     //updateOppLookupZuroSub(accoppList);
+     //Zuro Subscription Contract Lookup based on Opp Names match it with Order name in Contracts and Orders
+     //updateContractLookupZuroSub(contractOrdersList);
+     //Zuro Subscription Product Lookup- first get the lookup for the Product from the Org with CPQ
+     //updateProductLookupCPQProdForZuroSub(dmProductsList);
+	/////----------Quote
+	//*************New Full Load 
+	//updateContract - Swetha Mapped it with Producton Data 
+	//updateOppIdLookupInDMQuote(zQuote);//Opp,Account,StartDate,Enddate,Term
+	//Update Account lookup in Zuro customer 
+	//No Need updateAccountLookupInZuro(accList);
+	//updateCustomerEmailInCpqQuotes(customersList);
+	//updateCustomerEmailInCpqQuotesViaZuoraAcc(zQuote);//mismatch 15 digit ids
+	//QL - ----No Need for Acc,Opp in Opp Prod - lookup - we do have 18 digit id
+	//Get the Opp Prod count for Opp
+	//updateOppProdsCountForEachOpp(oppProdsExcel); 
+	 // CPQ Quote Line Products - check update part , and also for Missing CPQ Block prod Id update in excel-change the logic in code
+    // updateProductLookupCPQProdForOppProd(oppProdsExcel,nonMatchedCPQProductNameTodmProdMap);
+    //Update Quote Id in Opp Prod
+    //updateQuoteLookupInOppProdExcel(quotes);
+    // splitLogicWithDiscountPriceForCPQ(oppProdsExcel);
+    //Order:
+    //updateBillingFrequencyForQLfromQuote(quotes);
+	//End
+	//Update dmQuote's Account 
+	//updateAccLookupInDMQuote(accoppList);   
+	//Update dmQuotes Start Date and End Date based on Opp Product
+	//updateStartEndDatesInDMQuote(oppProdList);
+    //Update dmQuotes contract based on Order Name in Contracts and Orders
+    //updateContractLookupInCpqQuotes(contOrdersList);
+    //Update dmQuotes with bill to customer email from Zura Customer
+    //updateCustomerEmailInCpqQuotes(customersList);
+    //Validate Opp Prod
+    //validateOppProductForQuote(oppProdList,forInsertQuote);
+    //Get Start data end date from Opp  
+    //updateOppLookupInOppProdExcel(oppList);
+   //For---------- QuoteLInes
+   // updateQuoteLookupInOppProdExcel(quotes);
+    //Pre Process for QL load - Get the Opp Prod count for each opp and update it in each record.
+   // updateOppProdsCountForEachOpp(oppProdCountForOpp);
+    //QL - Create - Create Temp Object to split the Orders logic with Free Months Logic and Zero PB logic
+   // splitLogicWithDiscountPriceForCPQ(oppProdsExcel);//dmContractsOrdersList); For QL
+	//Set the Segmentation layout for QL
+ 	//setMDQLayoutForQLinTemp(qlForSegments);//,forUpdateQuoteLine);
+    //adjustCPQ_QL_Mod_LineItem(qlForProRateFix,forUpdateQLWithNewPercent);
+      //ValidateErrorQL(qlForProRateFix,forUpdateQLWithNewPercent);//At Quote Line Level
+     //Quote lInes for top 10 Quotes  
+    // getQLTempForTopNQuotesForInsert(quotesTop10,forInsertQuoteLine);
+    // CPQ Quote Line Products - check update part , and also for Missing CPQ Block prod Id update in excel-change the logic in code
+    //updateProductLookupCPQProdForOppProd(oppProdsExcel,nonMatchedCPQProductNameTodmProdMap);
+    //
+    //End
+    //-----------------Final Validation Quote and QL validation - Amount 
+     //verifyMigratedQuoteAmount(quotes,quoteToProdAmount);
+    //********** Invoice and Invoice Lines
+    //Update the Current Excel records - Lookup values
+    // updateInvoiceExcelLookups(quotes);//Lookup Opp,Quote,Account
+     //updateInvoiceExcelOrderLookUp(invExl);
+   // updateInvoiceExcelCPQInvoiceLookUp(invExl);//Line items Invoice Id update - Refer the dm_InvoicesIteratorBatch for Create Invocies and Lines
+     //updateProductLookupCPQProdForInvLinesExl(invExl);//Line items CPQ Prod Name,Prod Id update
+     //Payment Lookup
+     //Account 
+      //updatePaymentExcelLookups(accs);---dont use
+      //updatePaymentAccExcelLookups(payExl);
+      //updatePaymentExcelInvoiceLookups(payExl);
+     //getPaymentAllocation(invLineForAlloc);---In InvoicesIteratorBatch
+     //-----------Payment End----------
+     //***********Error Quote Fix
+     //Get the Error Quote Lines - and adjust the Discount
+     //update the Excel Line Item Level Amount in QL
+     //updateExcelLineItemTerm(quoteLinesError);//First Term then Amount
+     //Set the Disc Percent ,amount as 0,then find the fixamount with below,then update the QL with the fix.
+     //updateExcelLineItemAmntWithOppProd(quoteLinesError);//Second Disc Amount Term Amount
+     //Decimal Fix
+     //fixDecimal(oppProdsExcel);
+     fixDecimal(ql);
+}
+    public static void fixDecimal(List<dm_OpportunityProducts__c> oppProdsExcel)
+    {
+        List<dm_OpportunityProducts__c> up = new List<dm_OpportunityProducts__c>();
+		for(dm_OpportunityProducts__c  o: oppProdsExcel)
+		{
+   			// String s = String.valueOf(o.TOTALPRICE__c);
+    		 //String afterDecimal = s.substringAfter('.');
+    		 o.TOTALPRICE__c = o.TOTALPRICE__c.setScale(2,System.RoundingMode.HALF_UP);
+    		up.add(o);
+		}
+			Update up;
+    }
+     public static void fixDecimal(List<SBQQ__QuoteLine__c> qls)
+    {
+        List<SBQQ__QuoteLine__c> up = new List<SBQQ__QuoteLine__c>();
+		for(SBQQ__QuoteLine__c  o: qls)
+		{
+   			// String s = String.valueOf(o.TOTALPRICE__c);
+    		 //String afterDecimal = s.substringAfter('.');
+    		 o.dm_OldOppProd_TotalPrice__c = o.dm_OldOppProd_TotalPrice__c.setScale(2,System.RoundingMode.HALF_UP);
+    		up.add(o);
+		}
+			Update up;
+    }
+    //------------Update Billing freq QL
+    public static void updateBillingFrequencyForQLfromQuote(List<SBQQ__Quote__c> quotes){
+        List<SBQQ__QuoteLine__c> forUpdate = new List<SBQQ__QuoteLine__c>();
+        Map<Id,SBQQ__Quote__c> qMap = new Map<Id,SBQQ__Quote__c>(quotes);
+        List<SBQQ__QuoteLine__c> qls = [Select Id,SBQQ__BillingFrequency__c,SBQQ__Quote__r.SBQQ__BillingFrequency__c from
+                                        SBQQ__QuoteLine__c where SBQQ__Quote__c in :qMap.keySet() 
+                                        and SBQQ__Quote__r.DM_Quote__c = true and SBQQ__BillingFrequency__c = null and SBQQ__ChargeType__c ='Recurring'];
+        for(SBQQ__QuoteLine__c ql : qls)
+        {
+            //if(qMap.containsKey(ql.SBQQ__Quote__c))
+            ql.SBQQ__BillingFrequency__c = ql.SBQQ__Quote__r.SBQQ__BillingFrequency__c;forUpdate.add(ql);
+        }
+        if(forUpdate.size()>0)
+            update forUpdate;
+    }
+    //End
+    //--------------------------Error QL---------------------
+    //First update the Line level amount from Excel
+    public static void updateExcelLineItemTerm(List<SBQQ__QuoteLine__c> errQLines)
+    {
+        //Step 1 : Get the Opp Prod Term from Temp Table
+        //Step 2: The follow the below
+        //With Split Logic
+        //QL ----Per Month Cost = Opp Prod Price / total Term(before split) 
+        //QL     Original Sale Price = Per Month Cost * term (after split)
+        //Get the Opp Prod Ids and Terms
+        List<SBQQ__QuoteLine__c> forUpdate = new List<SBQQ__QuoteLine__c>();
+        Map<String,Double> oppProdIdToTerm = new Map<String,Double>();
+        //Opp Prod Id to QL
+        Map<String,List<SBQQ__QuoteLine__c>> oppProdIdToQL = new Map<String,List<SBQQ__QuoteLine__c>>();
+        for(SBQQ__QuoteLine__c ql : errQLines)
+       {
+			if(oppProdIdToQL.containsKey(ql.dm_Old_Opp_Prod_Id__c))
+                oppProdIdToQL.get(ql.dm_Old_Opp_Prod_Id__c).add(ql);
+            else
+                oppProdIdToQL.put(ql.dm_Old_Opp_Prod_Id__c,new List<SBQQ__QuoteLine__c>{ql});
+			//Decimal perMonthCost = ql.dm_Old_Opp_Prod_Id__c / ql.sbqq__sub
+        // {
+            //ql.SBQQ__NetTotal__c;
+         //}
+       }
+        //Get the Opp Prod Records
+        //Get the Opp Prod for the above quotes
+        List<dm_OpportunityProducts__c> oppProds = [Select Id,dm_Product_Name_New__c,dm_ProductId_New__c,Quote_Temp__c,DISCOUNT_AMOUNT_C__c,TOTALPRICE__c,Opportunity_Temp__c,Opportunity_Temp__r.Start_Date__c,
+       					Opportunity_Temp__r.End_Date__c,LICENSE_PRICE_C__c,END_DATE_C__c,ACCOUNT_ID_C__c,OPPORTUNITYID__c,CONTRACT_ID_NEW_C__c,
+       					START_DATE_C__c,OPPORTUNITY_NAME_C__c,PRODUCT_NAME_C__c,PC_1_C__c,TERM_C__c,LISTPRICE__c,OPPPRODID_C__c,PRODUCT2ID__c,QUANTITY__c,MONTHLY_RECURRING_REVENUE_C__c 
+       					from dm_OpportunityProducts__c where Id in :oppProdIdToQL.keySet() ];
+        for(dm_OpportunityProducts__c oppProd : oppProds)
+        {
+            //Get the Id to term
+            oppProdIdToTerm.put(oppProd.Id,oppProd.TERM_C__c);	
+        }
+        for(String oppProdId : oppProdIdToQL.keySet())
+        {
+            //Get the term and update QL
+            if(oppProdIdToQL.containsKey(oppProdId))
+            {
+                List<SBQQ__QuoteLine__c> qlTemp = oppProdIdToQL.get(oppProdId);
+                for(SBQQ__QuoteLine__c qlObj : qlTemp)
+                {
+                    qlObj.dm_Old_Opp_Prod_Term__c = oppProdIdToTerm.get(oppProdId);
+                    forUpdate.add(qlObj);
+                }
+            }
+                
+        }
+        if(forUpdate.size()>0)
+            Database.update(forUpdate);
+    }
+    public static void updateExcelLineItemAmntWithOppProd(List<SBQQ__QuoteLine__c> errQLines)
+    {
+       //Step 2: Then follow the below to get the orig amount at QL
+        //With Split Logic
+        //QL ----Per Month Cost = Opp Prod Price / total Term(before split) 
+        //QL     Original Sale Price = Per Month Cost * term (after split)
+        /////////New Logic : Clear the Error Quote Lines Net Total Amount.Then update the below Discount Amount---to do test
+        //Get the Opp Prod Ids and Terms
+        List<SBQQ__QuoteLine__c> forUpdate = new List<SBQQ__QuoteLine__c>();
+        Map<String,Double> oppProdIdToTerm = new Map<String,Double>();
+        //Opp Prod Id to QL
+        Map<String,List<SBQQ__QuoteLine__c>> oppProdIdToQL = new Map<String,List<SBQQ__QuoteLine__c>>();
+        //1.Find Originl Price per line with Opp Prod Price 
+        for(SBQQ__QuoteLine__c ql : errQLines)
+       {
+           Decimal perMonthCost = ql.dm_OldOppProd_TotalPrice__c / ql.dm_Old_Opp_Prod_Term__c;
+           Decimal origSalePrice = perMonthCost * ql.SBQQ__SubscriptionTerm__c;
+           Decimal discPercentForFix  = origSalePrice > 0 ? (origSalePrice - ql.SBQQ__NetTotal__c)/origSalePrice : 0;
+           ql.dm_Old_Opp_Prod_Price_PerLine__c = origSalePrice;
+           ql.dm_Before_ErrFix_DiscAmnt__c = ql.SBQQ__AdditionalDiscountAmount__c; //Preserve the discount amount
+          // ql.dm_TempDiscAmtErrFix__c = discPercentForFix.setScale(5);//For AdditionalDisc Percent-Error  Fix
+           ql.Per_Month_Cost__c = perMonthCost;
+           forUpdate.add(ql);
+       } ////1.For temp values
+      /* //2.Comment the above then use the below to get the fixed records
+      
+       for(SBQQ__QuoteLine__c  ql : errQLines)
+		{
+           //Decimal diff = ql.dm_Old_Opp_Prod_Price_PerLine__c - ql.SBQQ__NetTotal__c;
+    	   //if(diff == 0)System.debug('Diff == 0==='+ql.Name+'--'+ql.Id+'---'+ql.SBQQ__Quote__r.Name+'---'+diff);
+          /* if(diff != 0){
+        	//ids.add(ql.SBQQ__Quote__r.Name);
+               System.debug('Diff != 0==='+ql.Name+'--'+ql.Id+'---'+ql.SBQQ__Quote__r.Name+'---'+diff);
+        if(ql.SBQQ__NetTotal__c != ql.dm_Old_Opp_Prod_Price_PerLine__c)//ql.SBQQ__NetTotal__c * ql.SBQQ__SubscriptionTerm__c) == ql.dm_Old_Opp_Prod_Price_PerLine__c)
+        {System.debug('Diff != After multi 0==='+ql.Name+'--'+ql.Id+'---'+(ql.SBQQ__NetTotal__c * ql.SBQQ__SubscriptionTerm__c)+'Per:'+ql.dm_Old_Opp_Prod_Price_PerLine__c);
+         //Didn't update - ql.SBQQ__NetPrice__c = ql.SBQQ__NetTotal__c * ql.SBQQ__SubscriptionTerm__c;
+         forUpdate.add(ql);
+        }*/
+            //2.Flag at QL update - Add the Error Flag at Quoteline level 
+          
+          /* if(ql.SBQQ__NetTotal__c != roundedOppProd)
+           {
+               ql.DM_ErrorQL__c = true;
+               forUpdate.add(ql);}
+            else {ql.DM_ErrorQL__c = false;
+               forUpdate.add(ql);}
+           */
+            //3.//Error Quote Fix
+				//1.Remove discount percent for all error records - through Data loader using DM_ErrorQL
+				//2.Diff = CPQ Net Total - Original Price(opp prod) 
+				//3.Discount amount = Diff/Quantity
+				//4.Note: CPQ Net Total > Original Price(opp prod)  then Discount amount should be +ve else -ve
+		  /*  Decimal roundedOppProd = ql.dm_Old_Opp_Prod_Price_PerLine__c.setScale(2);
+            if(ql.SBQQ__NetTotal__c != roundedOppProd && ql.DM_ErrorQL__c)
+           {
+               if(ql.SBQQ__NetTotal__c > roundedOppProd)
+              ql.dm_TempDiscAmtErrFix__c = (ql.SBQQ__NetTotal__c - roundedOppProd)/ql.SBQQ__Quantity__c  * (-1);
+               else
+              ql.dm_TempDiscAmtErrFix__c = ((ql.SBQQ__NetTotal__c - roundedOppProd)/ql.SBQQ__Quantity__c) ;//* (-1);
+             //ql.dm_TempDiscAmtErrFix__c = 0;//Clean up
+               forUpdate.add(ql);}
+    }*/
+
+    //New
+        System.debug('forUpdate Size:'+forUpdate.size()); 
+        if(forUpdate.size()>0)
+           Database.update(forUpdate);
+    }
+    //-----------Error QL End-------------------------
+    //-------Payments--------------------
+    //Payment Lookup update - Account Id
+   public static void updatePaymentAccExcelLookups(List<dm_Zuora_Payment__c> payExl)//List<Account> accs
+  {
+    //For Update
+    List<dm_Zuora_Payment__c> forUpdate = new  List<dm_Zuora_Payment__c>();
+    //Get the Account based on the Account Name - we can't use the CRMAccountId in the excel as it has 15 digits instead of 18
+    for(dm_Zuora_Payment__c pay : payExl)
+    {
+        pay.Account__c = pay.Account_CRM_Account_ID__c;
+        forUpdate.add(pay);
+    }
+    if(forUpdate.size()>0)
+          Database.update(forUpdate);
+  }
+  //Payment Lookup update - Account Id
+   public static void updatePaymentExcelLookups(List<Account> accs)//List<dm_Zuora_Payment__c> payExl)
+  {
+    //For Update
+    List<dm_Zuora_Payment__c> forUpdate = new  List<dm_Zuora_Payment__c>();
+    List<dm_Zuora_Payment__c> payments = [Select Id,Invoice__c,Account__c,Account_Name__c,Account_CRM_Account_ID__c from 
+                          dm_Zuora_Payment__c where Account_Name__c != null ];//and Account__c = null Limit 5000];
+    Map<String,Account> accMap = new Map<String,Account>();
+    for(Account a : accs)
+    {accMap.put(a.Name,a);}
+    Map<String,List<dm_Invoice_InvoiceLine__c>> oppNameToInvExcel = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+    //Get the Account based on the Account Name - we can't use the CRMAccountId in the excel as it has 15 digits instead of 18
+    for(dm_Zuora_Payment__c pay : payments)
+    {
+        if(accMap.containsKey(pay.Account_Name__c))
+        pay.Account__c = accMap.get(pay.Account_Name__c).Id;
+        forUpdate.add(pay);
+    }
+    if(forUpdate.size()>0)
+          Database.update(forUpdate);
+  }
+    //Payment Lookup update - Invoice Id
+   public static void updatePaymentExcelInvoiceLookups(List<dm_Zuora_Payment__c> payExl)
+  {
+     //Updat the Invoice Id based on the Invoice Number and Opportunity
+    List<dm_Zuora_Payment__c> forUpdatePayExl = new List<dm_Zuora_Payment__c>();
+    //Account to Payments
+    Map<String,List<dm_Zuora_Payment__c>> accInvNumToPayExl = new Map<String,List<dm_Zuora_Payment__c>>();
+    Map<String,blng__Invoice__c> accInvNumToBillingInv = new Map<String,blng__Invoice__c>();
+    Set<String> accIds = new Set<String>();
+     /* For 15 digit Acc Id
+    for(dm_Zuora_Payment__c pay : payExl) {
+      accIds.add(pay.Account__c.to15());
+        
+      if (accInvNumToPayExl.containsKey(pay.Account__c+'-'+pay.Zuora_Invoice_Number__c))
+          accInvNumToPayExl.get(pay.Account__c.to15()+'-'+pay.Zuora_Invoice_Number__c).add(pay);
+        else accInvNumToPayExl.put(pay.Account__c.to15()+'-'+pay.Zuora_Invoice_Number__c,new List<dm_Zuora_Payment__c>{pay});
+    }*/
+    //For 18 digit Account Id
+    for(dm_Zuora_Payment__c pay : payExl) {
+      accIds.add(pay.Account__c.to15());
+        
+      if (accInvNumToPayExl.containsKey(pay.Account__c+'-'+pay.Zuora_Invoice_Number__c))
+          accInvNumToPayExl.get(pay.Account__c.to15()+'-'+pay.Zuora_Invoice_Number__c).add(pay);
+        else accInvNumToPayExl.put(pay.Account__c.to15()+'-'+pay.Zuora_Invoice_Number__c,new List<dm_Zuora_Payment__c>{pay});
+    }
+     //Get the List of Opportunity Records and group it based on the Invoice Number
+     Map<String,List<dm_Invoice_InvoiceLine__c>> invNumberToInvExlMap = new Map<String,List<dm_Invoice_InvoiceLine__c>>(); 
+     //Get the Billing Invoices
+      List<blng__Invoice__c> billingInvList = [Select Id,blng__Account__c,Opportunity__c,Zuora_Invoice_Number__c from blng__Invoice__c where
+                                               blng__Account__c in :accIds and 
+                                               DM_Invoice__c =true]; //No Manual Fix];
+                                               //and CreatedDate = today];//Manual Fixs
+      //Opp To Billing Inv Map with Zuora Invoice Number
+      /* 15 Digit
+      for(blng__Invoice__c inv : billingInvList)
+      {
+          System.debug('Blng contains:'+(inv.blng__Account__c+'-'+inv.Zuora_Invoice_Number__c));
+          if(! accInvNumToBillingInv.containsKey(inv.blng__Account__c.to15()+'-'+inv.Zuora_Invoice_Number__c))
+              accInvNumToBillingInv.put(inv.blng__Account__c.to15()+'-'+inv.Zuora_Invoice_Number__c,inv);
+      }*/
+      //18 Digit
+      for(blng__Invoice__c inv : billingInvList)
+      {
+          System.debug('Blng contains:'+(inv.blng__Account__c+'-'+inv.Zuora_Invoice_Number__c));
+          if(! accInvNumToBillingInv.containsKey(inv.blng__Account__c+'-'+inv.Zuora_Invoice_Number__c))
+              accInvNumToBillingInv.put(inv.blng__Account__c+'-'+inv.Zuora_Invoice_Number__c,inv);
+      }
+      //Map the Inv Id to InvExcel using the Account Id and Inv Number
+      for(String accInvNumber : accInvNumToPayExl.keySet())
+      {
+          //System.debug('Contains:'+(payObj.Opportunity__c+'-'+payObj.Invoice_Invoice_Number__c));
+          if(accInvNumToBillingInv.containsKey(accInvNumber))
+          {
+              //Get the Payments for the Account and Invoice Number records - it may have more than one -Processed,Error,Cancelled
+              //System.debug('IN Contains:'+(payObj.blng__Account__c+'-'+payObj.Invoice_Invoice_Number__c));
+              List<dm_Zuora_Payment__c> temp = accInvNumToPayExl.get(accInvNumber);
+              for(dm_Zuora_Payment__c payObj : temp){
+              payObj.Invoice__c = accInvNumToBillingInv.get(accInvNumber).Id;//payObj.Account__c+'-'+payObj.Zuora_Invoice_Number__c).Id;
+              forUpdatePayExl.add(payObj);
+              }
+          }
+      }
+      for(String accInv :accInvNumToBillingInv.keySet())
+      {
+          if(! accInvNumToPayExl.containsKey(accInv))
+          System.debug('Billing accInvNumber:'+accInv);
+      }
+      System.debug('forUpdatePayExl Size:'+forUpdatePayExl.size());
+      if(forUpdatePayExl.size()>0)
+          Database.Update(forUpdatePayExl);
+  }
+    //-------------------------------------
+    //--------Payments Allocation---------
+    //Use the dm_InvoicesIteratorBatch
+	//--------------------------------------
+    //Prod Name CPQ - Invoice lines preparation
+  public static void updateProductLookupCPQProdForInvLinesExl(List<dm_Invoice_InvoiceLine__c > invList)
+ {
+     Map<String,List<dm_Invoice_InvoiceLine__c>> productNameTodmInvMap = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+     Map<String,dm_Invoice_InvoiceLine__c> dmInvMap = new Map<String,dm_Invoice_InvoiceLine__c>(invList);
+     List<Product2> orgProducts = [Select Id,Name,PC_1__c from Product2 where Name like '%CPQ'];
+     Set<String> oppNames = new Set<String>();
+     Set<String> productsName = new Set<String>();
+     Map<String,Product2> orgProductsMap = new Map<String,Product2>();//(orgProducts);
+     //Get the Product Code with Name in a set
+     for(Product2 p : orgProducts)  
+     {
+         productsName.add(p.Name);
+         System.debug('Product Name:'+p.Name);
+         orgProductsMap.put(p.Name,p);
+     }
+     
+	 List<dm_Invoice_InvoiceLine__c> forUpdate = new List<dm_Invoice_InvoiceLine__c >();
+	for(dm_Invoice_InvoiceLine__c  inv : invList)
+	{
+         System.debug('Name:-CPQ:'+inv.PRODUCT_NAME__c+'-CPQ');
+         System.debug('Name:-CPQ'+productsName.contains(inv.PRODUCT_NAME__c+'-CPQ'));
+         System.debug('Name: -CPQ'+productsName.contains(inv.PRODUCT_NAME__c+ ' -CPQ'));
+         System.debug('Name: - CPQ'+productsName.contains(inv.PRODUCT_NAME__c+' - CPQ'));
+         System.debug('Name: CPQ'+productsName.contains(inv.PRODUCT_NAME__c+' CPQ'));
+        //Check for the Product name in CPQ
+         //This logic is for the different names in Opp Prod excel and Block Price Product in org
+        /*String  prodNameWithoutCurlyBraces = inv.PRODUCT_NAME__c.contains('(') ? inv.PRODUCT_NAME__c.substringBeforeLast('(').trim() : inv.PRODUCT_NAME__c;
+        //System.debug('name:'+name);
+        System.debug('prodNameWithoutCurlyBraces:'+prodNameWithoutCurlyBraces);
+        if(productsName.contains(prodNameWithoutCurlyBraces+'-CPQ') || productsName.contains(prodNameWithoutCurlyBraces+ ' -CPQ')
+            || productsName.contains(prodNameWithoutCurlyBraces+' - CPQ') || productsName.contains(prodNameWithoutCurlyBraces+' CPQ'))
+            {
+                String prodNameWithCPQ = '';
+                if(productsName.contains(prodNameWithoutCurlyBraces+'-CPQ'))
+                    prodNameWithCPQ = prodNameWithoutCurlyBraces+'-CPQ';
+                 else if(productsName.contains(prodNameWithoutCurlyBraces+ ' -CPQ'))
+                     prodNameWithCPQ = prodNameWithoutCurlyBraces+ ' -CPQ';
+                 else if(productsName.contains(prodNameWithoutCurlyBraces+' - CPQ'))
+                     prodNameWithCPQ = prodNameWithoutCurlyBraces+' - CPQ';
+                 else if (productsName.contains(prodNameWithoutCurlyBraces+' CPQ'))
+                     prodNameWithCPQ = prodNameWithoutCurlyBraces+' CPQ';
+                System.debug('prodNameWithCPQ:IN:'+prodNameWithCPQ);
+          if(productNameTodmInvMap.containsKey(prodNameWithCPQ))
+           productNameTodmInvMap.get(prodNameWithCPQ).add(inv);
+          else productNameTodmInvMap.put(prodNameWithCPQ,new List<dm_Invoice_InvoiceLine__c>{inv});
+           }
+        /*/
+         if(productsName.contains(inv.PRODUCT_NAME__c+'-CPQ') || productsName.contains(inv.PRODUCT_NAME__c+ ' -CPQ')
+            || productsName.contains(inv.PRODUCT_NAME__c+' - CPQ') || productsName.contains(inv.PRODUCT_NAME__c+' CPQ'))
+            {
+                String prodNameWithCPQ = '';
+                if(productsName.contains(inv.PRODUCT_NAME__c+'-CPQ'))
+                    prodNameWithCPQ = inv.PRODUCT_NAME__c+'-CPQ';
+                 else if(productsName.contains(inv.PRODUCT_NAME__c+ ' -CPQ'))
+                     prodNameWithCPQ = inv.PRODUCT_NAME__c+ ' -CPQ';
+                 else if(productsName.contains(inv.PRODUCT_NAME__c+' - CPQ'))
+                     prodNameWithCPQ = inv.PRODUCT_NAME__c+' - CPQ';
+                 else if (productsName.contains(inv.PRODUCT_NAME__c+' CPQ'))
+                     prodNameWithCPQ = inv.PRODUCT_NAME__c+' CPQ';
+                
+          if(productNameTodmInvMap.containsKey(prodNameWithCPQ))
+           productNameTodmInvMap.get(prodNameWithCPQ).add(inv);
+          else productNameTodmInvMap.put(prodNameWithCPQ,new List<dm_Invoice_InvoiceLine__c >{inv});
+           }
+    }
+	for(String dmProdName :productNameTodmInvMap.keySet())
+    {
+        if(orgProductsMap.containsKey(dmProdName))
+        {
+            List<dm_Invoice_InvoiceLine__c> dmInvTemp = productNameTodmInvMap.get(dmProdName);
+            for(dm_Invoice_InvoiceLine__c p : dmInvTemp)
+            {
+                if(p.Product__c == null && p.ProductNameCPQ__c == null ){
+                p.Product__c = (orgProductsMap.get(dmProdName)).Id;
+                p.ProductNameCPQ__c = dmProdName;//Name with CPQ
+                forUpdate.add(p);
+                }
+            }
+        }
+    }
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+  
+   //InvExcel Order 
+  public static void updateInvoiceExcelOrderLookUp(List<dm_Invoice_InvoiceLine__c> invsExl)
+  {
+      List<dm_Invoice_InvoiceLine__c> forUpdate = new List<dm_Invoice_InvoiceLine__c>();
+      Map<String,dm_Invoice_InvoiceLine__c> quoteToInvExl = new Map<String,dm_Invoice_InvoiceLine__c>();
+      Map<String,Order> quoteToOrder = new Map<String,Order>();
+      for(dm_Invoice_InvoiceLine__c invObj : invsExl)
+      {
+          if(! quoteToInvExl.containsKey(invObj.Quote__c))
+              quoteToInvExl.put(invObj.Quote__c,invObj);
+      }
+      List<Order> orders = [Select Id,Product_Category_Name__c,SBQQ__Quote__c,SBQQ__Quote__r.Customer_Billing_Email_Id_s__c from Order where 
+                            SBQQ__Quote__r.DM_ErrorQuote__c = false and SBQQ__Quote__r.DM_Quote__c = true and 
+                            Product_Category_Name__c = 'Licenses' and SBQQ__Quote__c in :quoteToInvExl.keySet() ];
+      //Get the Quote to Order Map
+      for(Order orderObj : orders)
+      {
+          if(! quoteToOrder.containsKey(orderObj.SBQQ__Quote__c))
+              quoteToOrder.put(orderObj.SBQQ__Quote__c,orderObj);
+      }
+      //Map the Order to InvExcel using the Quote Id
+      for(dm_Invoice_InvoiceLine__c invObj : invsExl)
+      {
+          if(quoteToOrder.containsKey(invObj.Quote__c))
+          {
+              invObj.Order__c = quoteToOrder.get(invObj.Quote__c).Id;
+              invObj.CustomerBillingEmailId__c = quoteToOrder.get(invObj.Quote__c).SBQQ__Quote__r.Customer_Billing_Email_Id_s__c;
+              forUpdate.add(invObj);
+          }
+      }
+      if(forUpdate.size()>0)
+          Database.Update(forUpdate);
+  }
+  //Invoice Invoice Lines - Lookup Opp,Quote,Account
+  public static void updateInvoiceExcelLookups(List<SBQQ__Quote__c> quotes)
+  {
+    //For Update
+    List<dm_Invoice_InvoiceLine__c> forUpdate = new  List<dm_Invoice_InvoiceLine__c>();
+    Map<String,SBQQ__Quote__c> oppNameToQuoteMap = new Map<String,SBQQ__Quote__c>();
+    Map<String,List<dm_Invoice_InvoiceLine__c>> oppNameToInvExcel = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+    //Get the Quote based on the Opportunity Name
+    for(SBQQ__Quote__c q : quotes)
+    {
+        if(!oppNameToQuoteMap.containsKey(q.SBQQ__Opportunity2__r.Name))
+            oppNameToQuoteMap.put(q.SBQQ__Opportunity2__r.Name,q);
+    }
+    //Map the Opportunity Name with Invoice and Lines Excel
+    List<dm_Invoice_InvoiceLine__c> invoiceExcel = [Select Id,Subscription_Opportunity_Name__c,Opportunity__c,Quote__c,Account__c from 
+                                                    dm_Invoice_InvoiceLine__c 
+                                                    where Subscription_Opportunity_Name__c in :oppNameToQuoteMap.keySet() 
+                                                    and Subscription_Opportunity_Name__c != null ];//and (Account__c = null or Opportunity__c = null or Quote__c = null)];
+    //Map the records with Opp Names
+      for(dm_Invoice_InvoiceLine__c invEx : invoiceExcel){
+    	if(oppNameToInvExcel.containsKey(invEx.Subscription_Opportunity_Name__c))
+            oppNameToInvExcel.get(invEx.Subscription_Opportunity_Name__c).add(invEx);
+          else oppNameToInvExcel.put(invEx.Subscription_Opportunity_Name__c,new List<dm_Invoice_InvoiceLine__c>{invEx});
+      }
+      //Map the Migrated Quotes with Excel Opp Names
+      for(String oppExlName : oppNameToInvExcel.KeySet())
+      {
+          //Check for the name in Quote
+          if(oppNameToQuoteMap.containsKey(oppExlName))
+          {
+              //Update the Opportunity Id in the Excel records
+              List<dm_Invoice_InvoiceLine__c> temp = oppNameToInvExcel.get(oppExlName);
+              for(dm_Invoice_InvoiceLine__c obj : temp)
+              {
+                  obj.Opportunity__c = oppNameToQuoteMap.get(oppExlName).SBQQ__Opportunity2__c;
+                  obj.Quote__c = oppNameToQuoteMap.get(oppExlName).Id;
+                  obj.Account__c = oppNameToQuoteMap.get(oppExlName).SBQQ__Account__c;
+                  forUpdate.add(obj);
+              }
+          }
+      }
+      if(forUpdate.size()>0)
+          Database.update(forUpdate);
+  }
+  public static void verifyMigratedQuoteAmount(List<SBQQ__Quote__c> quotes,Map<SBQQ__Quote__c,Decimal> quoteToProdAmount )
+  {
+      //Get the Quote amount 
+      //Get the Opp Prod Base - dm Prod = true Quote Amount
+      //And Map it.
+      Map<Id,SBQQ__Quote__c> quoteMap = new Map<Id,SBQQ__Quote__c>(quotes);
+      //Prod Total
+      Map<Id,Decimal> prdOppProdTotal = new Map<Id,Decimal>();
+      //Data Migration Quotes
+      Map<Id,Decimal> dmQuoteTotal = new Map<Id,Decimal>();
+      Map<Id,Id> quoteOldNewMap = new Map<Id,Id>();
+      for(SBQQ__Quote__c q : quotes)
+      {
+          if(q.SBQQ__Source__c != null)
+              quoteOldNewMap.put(q.SBQQ__Source__c,q.Id);
+      }
+      List<dm_OpportunityProducts__c> prodOppProds = [Select Id,TOTALPRICE__c,Quote_Temp__c from dm_OpportunityProducts__c where 
+                                                      dm_Product_Name_New__c != null 
+                             and dm_ProductId_New__c != null 
+                                                      //and From_Prod__c=true 
+                                                      and Quote_Temp__c in :quoteOldNewMap.keySet()];//quoteMap.keySet()];
+      //Prod Net Total for Quotes.
+      for(dm_OpportunityProducts__c oppProd : prodOppProds)
+      {
+          if(prdOppProdTotal.containsKey(oppProd.Quote_Temp__c))
+          {
+              Decimal amount = prdOppProdTotal.get(oppProd.Quote_Temp__c) + oppProd.TOTALPRICE__c;
+              prdOppProdTotal.put(oppProd.Quote_Temp__c,amount);
+          }
+          else prdOppProdTotal.put(oppProd.Quote_Temp__c,oppProd.TOTALPRICE__c);
+      }
+      //Quote Net Total 
+      for(SBQQ__Quote__c q : quoteMap.Values())
+      {
+          if(dmQuoteTotal.containsKey(q.SBQQ__Source__c))//q.Id))
+          {
+              Decimal amount = dmQuoteTotal.get(q.SBQQ__Source__c);//q.Id);
+              dmQuoteTotal.put(q.SBQQ__Source__c,amount);//q.Id,amount);
+          }
+          else dmQuoteTotal.put(q.SBQQ__Source__c,q.SBQQ__NetAmount__c);//q.Id,q.SBQQ__NetAmount__c);
+      }
+      for(SBQQ__Quote__c q : quoteMap.Values())
+      {
+          if(dmQuoteTotal.containsKey(q.SBQQ__Source__c) && prdOppProdTotal.containsKey(q.SBQQ__Source__c))// q.Id) && prdOppProdTotal.containsKey(q.Id))
+          {
+              // DIff
+             // if(dmQuoteTotal.get(q.Id) != prdOppProdTotal.get(q.Id))
+              //if(dmQuoteTotal.get(q.Id) == prdOppProdTotal.get(q.Id))
+               if(dmQuoteTotal.get(q.SBQQ__Source__c) == prdOppProdTotal.get(q.SBQQ__Source__c))
+              { if(! quoteToProdAmount.containsKey(q))
+                   quoteToProdAmount.put(q,prdOppProdTotal.get(q.SBQQ__Source__c));}//q.Id));}
+          }
+      }
+     // sendEmailWithAttachment(quoteToProdAmount);
+      
+  }
+ //Update the Mod line item with Discount Adjjustment to get the proper total
+ //Collect the Prorate and sbscription term conflict records
+ //Then adjust the discount percent based on the correct Amount
+ //Get the Correct Discount Percent
+     //Based on the below steps:
+     /*Prorate Issues - record
+1.Calculate Total amount without any discount based on prorate multiplier 
+= Quantity * PB price * Subscription term(one month or 3 months etc) * prorate multiplier(current)
+= 85 * 59 * 1 * 2 = 10,030 ==== 7120
+2.Calculate Correct total amount
+= current total amount / prorate multiplier
+= 4250/2 = 2125====250===2080
+
+3.Determine Discount percent
+  (1 - (Correct Total Amount / Step 1 Amount ))*100
+ = (1 - (2125 / 10,030))*100
+ = 78.81355 %
+  */
+    //qlForProRateFix
+    //Insert the  quote lines with Opp Prod Id and the Line Total
+ public static void adjustCPQ_QL_Mod_LineItem(List<SBQQ__QuoteLine__c> qLines,List<SBQQ__QuoteLine__c> forUpdateQLWithNewPercent)
+ {
+    /* List<SBQQ__QuoteLine__c> qLines = [Select Id,Name,SBQQ__Quantity__c,dm_OldOppProd_TotalPrice__c,SBQQ__Quote__r.Name,SBQQ__Product__r.Name,SBQQ__StartDate__c,SBQQ__EndDate__c,SBQQ__SegmentIndex__c,
+     					  SBQQ__Number__c,SBQQ__SegmentKey__c, SBQQ__SegmentLabel__c,SBQQ__NetTotal__c,
+                                         SBQQ__ListPrice__c,SBQQ__ProrateMultiplier__c,dm_Old_Opp_Prod_Id__c,SBQQ__SubscriptionTerm__c,SBQQ__Discount__c
+                                        from SBQQ__QuoteLine__c 
+                          where dm_OldOppProd_TotalPrice__c != null and SBQQ__SubscriptionTerm__c != null and SBQQ__NetTotal__c != null and SBQQ__ProrateMultiplier__c != null and DM_QuoteLine__c = true];*/
+     Map<Id,SBQQ__QuoteLine__c> qlMap = new Map<Id,SBQQ__QuoteLine__c>();
+     Map<Id,Decimal> oppProdToQLTotalMap = new Map<Id,Decimal>();
+     for(SBQQ__QuoteLine__c ql : qLines)
+     {
+         if(oppProdToQLTotalMap.containsKey(ql.dm_Old_Opp_Prod_Id__c))
+         {
+             Decimal total = oppProdToQLTotalMap.get(ql.dm_Old_Opp_Prod_Id__c) + ql.SBQQ__NetTotal__c;
+             oppProdToQLTotalMap.put(ql.dm_Old_Opp_Prod_Id__c,total);}
+         else oppProdToQLTotalMap.put(ql.dm_Old_Opp_Prod_Id__c,ql.SBQQ__NetTotal__c);
+     }
+     //Get the correct values from Opp Product Base Table based on the Opp Prod Id.
+     
+     Map<Id,SBQQ__QuoteLine__c> oppProdToQlMap = new Map<Id,SBQQ__QuoteLine__c>();
+     for(SBQQ__QuoteLine__c ql : qLines)
+     {
+         if((ql.SBQQ__SubscriptionTerm__c != null && ql.SBQQ__ProrateMultiplier__c != null)
+            && ql.SBQQ__ProrateMultiplier__c != ql.SBQQ__SubscriptionTerm__c)
+         {
+             System.debug('Prorate Error:'+ql.Name + '-Term:'+ql.SBQQ__SubscriptionTerm__c+'-Prorate:'+ql.SBQQ__ProrateMultiplier__c);
+             //if(ql.SBQQ__NetTotal__c)
+             qlMap.put(ql.Id,ql);
+             //Get the Opp Prod Id
+             //oppProdToQlMap.put(ql.dm_Old_Opp_Prod_Id__c,ql);
+         }
+         
+     }
+     //Get the Opp Prod records total amount for the product.
+     //List<dm_OpportunityProducts__c> oppProdBaseList = [Select Id,TOTALPRICE__c,dm_ProductId_New__c from dm_OpportunityProducts__c where Id in :oppProdToQlMap.keySet()];
+    // Map<Id,dm_OpportunityProducts__c> oppProdBaseMap = new Map<Id,dm_OpportunityProducts__c>(oppProdBaseList);
+   /*  for(Id qlId : qlMap.keySet() )
+     {
+         //Get the Total amount and check it from base table
+         //SBQQ__QuoteLine__c qlObj = qlMap.get(qlId);
+        // if(oppProdBaseMap.containsKey(qlMap.get(qlId).dm_Old_Opp_Prod_Id__c))
+         //{
+            // dm_OpportunityProducts__c oppProdObj = oppProdToQlMap.get(qlObj.dm_Old_Opp_Prod_Id__c);
+         System.debug('qlMap.get(qlId).dm_OldOppProd_TotalPrice__c:'+qlMap.get(qlId).dm_OldOppProd_TotalPrice__c);
+         System.debug('oppProdToQLTotalMap.get(qlMap.get(qlId).dm_Old_Opp_Prod_Id__c:'+oppProdToQLTotalMap.get(qlMap.get(qlId).dm_Old_Opp_Prod_Id__c));    
+         if(oppProdToQLTotalMap.containsKey(qlMap.get(qlId).dm_Old_Opp_Prod_Id__c) && qlMap.get(qlId).dm_OldOppProd_TotalPrice__c != oppProdToQLTotalMap.get(qlMap.get(qlId).dm_Old_Opp_Prod_Id__c))
+                {
+                  System.debug('Q-LP-ST-NT-PM:'+qlMap.get(qlId).SBQQ__Quantity__c+'-'+qlMap.get(qlId).SBQQ__ListPrice__c
+                      +'-'+qlMap.get(qlId).SBQQ__SubscriptionTerm__c+'-'+qlMap.get(qlId).SBQQ__NetTotal__c+'-'+qlMap.get(qlId).SBQQ__ProrateMultiplier__c);
+        		 //No Discount
+         		 Decimal withOutDiscountAmount = qlMap.get(qlId).SBQQ__Quantity__c * qlMap.get(qlId).SBQQ__ListPrice__c * qlMap.get(qlId).SBQQ__SubscriptionTerm__c * qlMap.get(qlId).SBQQ__ProrateMultiplier__c;
+        		 //Correct Amount based on Current Amount
+        		 Decimal correctTotalAmount = qlMap.get(qlId).SBQQ__NetTotal__c / qlMap.get(qlId).SBQQ__ProrateMultiplier__c;
+        		 Decimal discPercent = (1 - (correctTotalAmount / withOutDiscountAmount )) * 100;//SBQQ__Discount__c
+        		 qlMap.get(qlId).SBQQ__Discount__c = discPercent;
+        		 System.debug('discPercent:'+discPercent);
+                 System.debug('qlMap.get(qlId).SBQQ__Discount__c:'+qlMap.get(qlId).SBQQ__Discount__c);
+        		 //forUpdateQLWithNewPercent.add(qlMap.get(qlId));   
+                }
+         //}
+        
+     }
+*/    
+     sendEmailWithAttachment(qlMap.values());
+ }
+    //Validate at Quote Line Level
+ public static void ValidateErrorQL(List<SBQQ__QuoteLine__c> qLines,List<SBQQ__QuoteLine__c> forUpdateQLWithNewPercent)
+ {
+     Map<Id,SBQQ__QuoteLine__c> qlMap = new Map<Id,SBQQ__QuoteLine__c>();
+     Map<Id,Decimal> oppProdToQLTotalMap = new Map<Id,Decimal>();
+     for(SBQQ__QuoteLine__c ql : qLines)
+     {
+         if(oppProdToQLTotalMap.containsKey(ql.dm_Old_Opp_Prod_Id__c))
+         {
+             Decimal total = oppProdToQLTotalMap.get(ql.dm_Old_Opp_Prod_Id__c) + ql.SBQQ__NetTotal__c;
+             oppProdToQLTotalMap.put(ql.dm_Old_Opp_Prod_Id__c,total);}
+         else oppProdToQLTotalMap.put(ql.dm_Old_Opp_Prod_Id__c,ql.SBQQ__NetTotal__c);
+     }
+     //Get the Opp Prod for the above quotes
+     List<dm_OpportunityProducts__c> oppProds = [Select Id,dm_Product_Name_New__c,dm_ProductId_New__c,Quote_Temp__c,DISCOUNT_AMOUNT_C__c,TOTALPRICE__c,Opportunity_Temp__c,Opportunity_Temp__r.Start_Date__c,
+       					Opportunity_Temp__r.End_Date__c,LICENSE_PRICE_C__c,END_DATE_C__c,ACCOUNT_ID_C__c,OPPORTUNITYID__c,CONTRACT_ID_NEW_C__c,
+       					START_DATE_C__c,OPPORTUNITY_NAME_C__c,PRODUCT_NAME_C__c,PC_1_C__c,TERM_C__c,LISTPRICE__c,OPPPRODID_C__c,PRODUCT2ID__c,QUANTITY__c,MONTHLY_RECURRING_REVENUE_C__c 
+       					from dm_OpportunityProducts__c where dm_Product_Name_New__c = null
+       				    and dm_ProductId_New__c = null //and From_Prod__c = true 
+                                                 and Id in :oppProdToQLTotalMap.keySet() ];
+    
+     //Opp Prod map
+     Map<Id,dm_OpportunityProducts__c> oppProdMap = new Map<Id,dm_OpportunityProducts__c>(oppProds);
+     
+     //Get the correct values from Opp Product Base Table based on the Opp Prod Id.
+     
+     Map<Id,SBQQ__QuoteLine__c> oppProdToQlMap = new Map<Id,SBQQ__QuoteLine__c>();
+     for(SBQQ__QuoteLine__c ql : qLines)
+     {
+         if(oppProdToQLTotalMap.containsKey(ql.dm_Old_Opp_Prod_Id__c)
+           && oppProdToQLTotalMap.get(ql.dm_Old_Opp_Prod_Id__c) != ql.dm_OldOppProd_TotalPrice__c)
+         {
+             qlMap.put(ql.Id,ql);
+             //Get the Opp Prod Id
+             //oppProdToQlMap.put(ql.dm_Old_Opp_Prod_Id__c,ql);
+         }
+         
+     }
+     //Get the Opp Prod records total amount for the product.
+     //List<dm_OpportunityProducts__c> oppProdBaseList = [Select Id,TOTALPRICE__c,dm_ProductId_New__c from dm_OpportunityProducts__c where Id in :oppProdToQlMap.keySet()];
+    // Map<Id,dm_OpportunityProducts__c> oppProdBaseMap = new Map<Id,dm_OpportunityProducts__c>(oppProdBaseList);
+     /*for(Id qlId : qlMap.keySet() )
+     {
+         //Get the Total amount and check it from base table
+         //SBQQ__QuoteLine__c qlObj = qlMap.get(qlId);
+         if(oppProdMap.containsKey(qlMap.get(qlId).dm_Old_Opp_Prod_Id__c))
+         {
+            // dm_OpportunityProducts__c oppProdObj = oppProdToQlMap.get(qlObj.dm_Old_Opp_Prod_Id__c);
+         System.debug('qlMap.get(qlId).dm_OldOppProd_TotalPrice__c:'+qlMap.get(qlId).dm_OldOppProd_TotalPrice__c);
+         System.debug('oppProdToQLTotalMap.get(qlMap.get(qlId).dm_Old_Opp_Prod_Id__c:'+oppProdToQLTotalMap.get(qlMap.get(qlId).dm_Old_Opp_Prod_Id__c));    
+         if(oppProdToQLTotalMap.containsKey(qlMap.get(qlId).dm_Old_Opp_Prod_Id__c) && qlMap.get(qlId).dm_OldOppProd_TotalPrice__c != oppProdToQLTotalMap.get(qlMap.get(qlId).dm_Old_Opp_Prod_Id__c))
+                {
+                  System.debug('Q-LP-ST-NT-PM:'+qlMap.get(qlId).SBQQ__Quantity__c+'-'+qlMap.get(qlId).SBQQ__ListPrice__c
+                      +'-'+qlMap.get(qlId).SBQQ__SubscriptionTerm__c+'-'+qlMap.get(qlId).SBQQ__NetTotal__c+'-'+qlMap.get(qlId).SBQQ__ProrateMultiplier__c);
+        		 //No Discount
+         		 Decimal withOutDiscountAmount = qlMap.get(qlId).SBQQ__Quantity__c * qlMap.get(qlId).SBQQ__ListPrice__c * qlMap.get(qlId).SBQQ__SubscriptionTerm__c * qlMap.get(qlId).SBQQ__ProrateMultiplier__c;
+        		 //Correct Amount based on Current Amount
+        		 Decimal correctTotalAmount = qlMap.get(qlId).SBQQ__NetTotal__c / qlMap.get(qlId).SBQQ__ProrateMultiplier__c;
+        		 Decimal discPercent = (1 - (correctTotalAmount / withOutDiscountAmount )) * 100;//SBQQ__Discount__c
+        		 qlMap.get(qlId).SBQQ__Discount__c = discPercent;
+        		 System.debug('discPercent:'+discPercent);
+                 System.debug('qlMap.get(qlId).SBQQ__Discount__c:'+qlMap.get(qlId).SBQQ__Discount__c);
+        		 //forUpdateQLWithNewPercent.add(qlMap.get(qlId));   
+                }
+         }
+        
+     } */
+     sendEmailWithAttachment(qlMap.values());
+ }
+//QL 3.- Get the Quote Group,Numberegment Key,Index and other details fro MDQ
+ public static void setMDQLayoutForQLinTemp1(List<dm_Split_ForQLImport__c> qlForSegments,List<dm_Split_ForQLImport__c> forUpdateQuoteLine)
+  {
+      
+      /*newObj.Quote_Group__c = String.valueOf(i+1);
+                newObj.SegmentKey__c = oppProdObj.Id;
+               newObj.SegmentIndex__c = i+1;
+               newObj.SegmentLabel__c = 'Year '+i+1;
+               newObj.Number__c = i+1;*/
+               //Dimension__c*/
+      //Segment Update in Temp table List<dm_Split_ForQLImport__c> qlForSegments //For Segment Update
+      Map<String,List<dm_Split_ForQLImport__c>> quoteToQlMap = new Map<String,List<dm_Split_ForQLImport__c>>(); 
+      for(dm_Split_ForQLImport__c ql : qlForSegments)
+      {
+          if(ql.Quote__c != null)
+          {
+              if(ql.Quote__c == 'aCA7800000004YOGAY')
+              System.debug('QUOTE Map');
+
+              if(quoteToQlMap.containsKey(ql.Quote__c))
+              quoteToQlMap.get(ql.Quote__c).add(ql);
+              else 
+              quoteToQlMap.put(ql.Quote__c,new List<dm_Split_ForQLImport__c>{ql});
+          }
+      }
+      //Get the Quote Lines and set the segmentation details
+      for(String quoteId : quoteToQlMap.keySet())   
+      {
+         // Integer segNumber = 1;
+         //  System.debug('segNumber 1:'+ segNumber);
+          List<dm_Split_ForQLImport__c> qls = quoteToQlMap.get(quoteId);
+          if(quoteId == 'aCA7800000004YzGAI'){
+              for(dm_Split_ForQLImport__c q : qls)
+              {System.debug('QLS Name:'+ q.Product__r.Name);}System.debug('QLS Size:'+ qls.size());}
+          //Get the Product to QL map
+          Map<String,List<dm_Split_ForQLImport__c>> pdtToQLs = getProductToQL(qls);
+          if(quoteId == 'aCA7800000004YzGAI')System.debug('pdtToQLs Size:'+ pdtToQLs.size());
+          if(pdtToQLs.size()>0)
+          {   
+             /* for(String pdtId : pdtToQLs.keySet())
+              {   
+                  System.debug('segNumber In loop:'+ segNumber);
+                  System.debug('pdtId:'+ pdtId);
+                  List<dm_Split_ForQLImport__c> temp = pdtToQLs.get(pdtId);
+                  temp[0].Number__c = segNumber;
+                  temp[0].Quote_Group__c = String.valueOf(segNumber);
+                  segNumber = segNumber + 1;
+                  forUpdateQuoteLine.add(temp[0]);
+                /* else{
+                  for(dm_Split_ForQLImport__c qlineForPdt : temp)
+                  {
+                     System.debug('qlineForPdt.Quote_Group__c Out:'+ qlineForPdt.Quote_Group__c);
+                      System.debug('segNumber:In'+ segNumber);
+                      
+                    // if(qlineForPdt.Quote_Group__c == null){
+                      qlineForPdt.Number__c = segNumber;
+                      qlineForPdt.Quote_Group__c = String.valueOf(segNumber);
+                      //if(qlineForPdt.ChargeType__c == 'Recurring'){
+                      //qlineForPdt.SegmentKey__c = 'QL'+ segNumber;
+                      //}
+                      System.debug('qlineForPdt.Number__c:'+ qlineForPdt.Number__c);
+                      System.debug('qlineForPdt.Quote_Group__c:'+ qlineForPdt.Quote_Group__c);
+                      System.debug('qlineForPdt.SegmentKey__c:'+ qlineForPdt.SegmentKey__c);
+                      forUpdateQuoteLine.add(qlineForPdt);
+                      //}
+               //  segNumber = segNumber + 1;
+                  }
+              }*/
+            Integer segNumber = 1;
+              for(String pdtIdWithDisc : pdtToQLs.keySet())
+              {
+                  if(quoteId == 'aCA7800000004YzGAI')System.debug('temp pdtId:'+ pdtIdWithDisc);
+                  List<dm_Split_ForQLImport__c> temp = pdtToQLs.get(pdtIdWithDisc);
+                  if(quoteId == 'aCA7800000004YzGAI')System.debug('temp Size:'+ temp.size());
+                  for(dm_Split_ForQLImport__c qlineForPdt : temp)
+                  {
+                     //System.debug('qlineForPdt.Quote_Group__c Out:'+ qlineForPdt.Quote_Group__c);
+                      //System.debug('segNumber:In'+ segNumber);
+                      
+                    // if(qlineForPdt.Quote_Group__c == null){
+                      qlineForPdt.Number__c = segNumber;
+                      qlineForPdt.Quote_Group__c = String.valueOf(segNumber);
+                      if(qlineForPdt.ChargeType__c == 'Recurring'){
+                      qlineForPdt.SegmentKey__c = 'QL'+ segNumber;
+                      }
+                      if(quoteId == 'aCA7800000004YzGAI')System.debug('qlineForPdt.Number__c:'+ qlineForPdt.Number__c);
+                      if(quoteId == 'aCA7800000004YzGAI')System.debug('qlineForPdt.Quote_Group__c:'+ qlineForPdt.Quote_Group__c);
+                      if(quoteId == 'aCA7800000004YzGAI')System.debug('qlineForPdt.SegmentKey__c:'+ qlineForPdt.SegmentKey__c);
+                      forUpdateQuoteLine.add(qlineForPdt);
+                      //}
+                  }
+                         segNumber = segNumber + 1;
+                  temp.clear();
+              }
+          }
+          qls.clear();
+      }
+      if(forUpdateQuoteLine.size()>0)
+          Database.update(forUpdateQuoteLine);
+  }
+  public static void setMDQLayoutForQLinTemp(List<dm_Split_ForQLImport__c> qlForSegments)//,List<dm_Split_ForQLImport__c> forUpdateQuoteLine)
+  {
+      List<dm_Split_ForQLImport__c> forUpdateQuoteLine = new List<dm_Split_ForQLImport__c>();
+      /*newObj.Quote_Group__c = String.valueOf(i+1);
+                newObj.SegmentKey__c = oppProdObj.Id;
+               newObj.SegmentIndex__c = i+1;
+               newObj.SegmentLabel__c = 'Year '+i+1;
+               newObj.Number__c = i+1;*/
+               //Dimension__c*/
+      //Segment Update in Temp table List<dm_Split_ForQLImport__c> qlForSegments //For Segment Update
+      Map<String,List<dm_Split_ForQLImport__c>> quoteToQlMap = new Map<String,List<dm_Split_ForQLImport__c>>(); 
+      for(dm_Split_ForQLImport__c ql : qlForSegments)
+      {
+          if(ql.Quote__c != null)
+          {
+              if(ql.Quote__c == 'aCA7800000004YOGAY')
+              System.debug('QUOTE Map');
+
+              if(quoteToQlMap.containsKey(ql.Quote__c))
+              quoteToQlMap.get(ql.Quote__c).add(ql);
+              else 
+              quoteToQlMap.put(ql.Quote__c,new List<dm_Split_ForQLImport__c>{ql});
+          }
+      }
+      //Get the Quote Lines and set the segmentation details
+      for(String quoteId : quoteToQlMap.keySet())   
+      {
+         // Integer segNumber = 1;
+         //  System.debug('segNumber 1:'+ segNumber);
+          List<dm_Split_ForQLImport__c> qls = quoteToQlMap.get(quoteId);
+          if(quoteId == 'aCA7800000004YzGAI'){
+              for(dm_Split_ForQLImport__c q : qls)
+              {System.debug('QLS Name:'+ q.Product__r.Name);}System.debug('QLS Size:'+ qls.size());}
+          //Get the Product to QL map
+          Map<String,List<dm_Split_ForQLImport__c>> pdtToQLs = getProductToQL(qls);
+          if(quoteId == 'aCA7800000004YzGAI')System.debug('pdtToQLs Size:'+ pdtToQLs.size());
+          if(pdtToQLs.size()>0)
+          {   
+             /* for(String pdtId : pdtToQLs.keySet())
+              {   
+                  System.debug('segNumber In loop:'+ segNumber);
+                  System.debug('pdtId:'+ pdtId);
+                  List<dm_Split_ForQLImport__c> temp = pdtToQLs.get(pdtId);
+                  temp[0].Number__c = segNumber;
+                  temp[0].Quote_Group__c = String.valueOf(segNumber);
+                  segNumber = segNumber + 1;
+                  forUpdateQuoteLine.add(temp[0]);
+                /* else{
+                  for(dm_Split_ForQLImport__c qlineForPdt : temp)
+                  {
+                     System.debug('qlineForPdt.Quote_Group__c Out:'+ qlineForPdt.Quote_Group__c);
+                      System.debug('segNumber:In'+ segNumber);
+                      
+                    // if(qlineForPdt.Quote_Group__c == null){
+                      qlineForPdt.Number__c = segNumber;
+                      qlineForPdt.Quote_Group__c = String.valueOf(segNumber);
+                      //if(qlineForPdt.ChargeType__c == 'Recurring'){
+                      //qlineForPdt.SegmentKey__c = 'QL'+ segNumber;
+                      //}
+                      System.debug('qlineForPdt.Number__c:'+ qlineForPdt.Number__c);
+                      System.debug('qlineForPdt.Quote_Group__c:'+ qlineForPdt.Quote_Group__c);
+                      System.debug('qlineForPdt.SegmentKey__c:'+ qlineForPdt.SegmentKey__c);
+                      forUpdateQuoteLine.add(qlineForPdt);
+                      //}
+               //  segNumber = segNumber + 1;
+                  }
+              }*/
+            Integer segNumber = 1;
+              for(String pdtIdWithDisc : pdtToQLs.keySet())
+              {
+                  if(quoteId == 'aCA7800000004YzGAI')System.debug('temp pdtId:'+ pdtIdWithDisc);
+                  List<dm_Split_ForQLImport__c> temp = pdtToQLs.get(pdtIdWithDisc);
+                  if(quoteId == 'aCA7800000004YzGAI')System.debug('temp Size:'+ temp.size());
+                  for(dm_Split_ForQLImport__c qlineForPdt : temp)
+                  {
+                     //System.debug('qlineForPdt.Quote_Group__c Out:'+ qlineForPdt.Quote_Group__c);
+                      //System.debug('segNumber:In'+ segNumber);
+                      
+                    // if(qlineForPdt.Quote_Group__c == null){
+                      qlineForPdt.Number__c = segNumber;
+                      qlineForPdt.Quote_Group__c = String.valueOf(segNumber);
+                      if(qlineForPdt.ChargeType__c == 'Recurring'){
+                      qlineForPdt.SegmentKey__c = 'QL'+ segNumber;
+                      }
+                      if(quoteId == 'aCA7800000004YzGAI')System.debug('qlineForPdt.Number__c:'+ qlineForPdt.Number__c);
+                      if(quoteId == 'aCA7800000004YzGAI')System.debug('qlineForPdt.Quote_Group__c:'+ qlineForPdt.Quote_Group__c);
+                      if(quoteId == 'aCA7800000004YzGAI')System.debug('qlineForPdt.SegmentKey__c:'+ qlineForPdt.SegmentKey__c);
+                      forUpdateQuoteLine.add(qlineForPdt);
+                      //}
+                  }
+                         segNumber = segNumber + 1;
+              }
+          }
+          qls.clear();
+      }
+      if(forUpdateQuoteLine.size()>0)
+          Database.update(forUpdateQuoteLine);
+  }
+    //QL - Helper 
+   public static Map<String,List<dm_Split_ForQLImport__c>> getProductToQL(List<dm_Split_ForQLImport__c> qls)
+   {
+       Map<String,List<dm_Split_ForQLImport__c>> pdtToQL = new  Map<String,List<dm_Split_ForQLImport__c>>();
+       for(dm_Split_ForQLImport__c ql : qls)
+       {
+          //LicensePrice
+           /*if(pdtToQL.containsKey(ql.Product__c))
+               pdtToQL.get(ql.Product__c).add(ql);
+            else pdtToQL.put(ql.Product__c,new List<dm_Split_ForQLImport__c>{ql});*/
+          // if(pdtToQL.containsKey(ql.Product__c+'-'+ql.Id))//LicensePrice
+            if(pdtToQL.containsKey(ql.Product__c+'-'+ql.Opportunity_Product__c))//+'-'+ql.LicensePrice__c))//LicensePrice
+               pdtToQL.get(ql.Product__c+'-'+ql.Opportunity_Product__c).add(ql);//+'-'+ql.LicensePrice__c)
+            else pdtToQL.put(ql.Product__c+'-'+ql.Opportunity_Product__c,new List<dm_Split_ForQLImport__c>{ql});
+           
+       }
+       return pdtToQL;
+   }
+  //QL 2.- Discount % calculated based on the = ((Unit Price from PB - License Price )/Unit Price from PB)  *100 for CPQ Products suffixed with CPQ
+ //----Added Free Months-CPQ logic -Should be Negative amount on the UI,so keep it as positive.
+  //   Instead of discount %,discount amount will be added here.
+  //   AdditionalDiscount Amount = License Price * 12  for one record
+ //----Discount % If the Unit Price from PB is zero, AdditionalDiscount Amount = License Price * 12  for one record will be used 
+ //    with positive value on the UI , so keep it as Negative here.
+  public static void splitLogicWithDiscountPriceForCPQ( List<dm_OpportunityProducts__c> oppProdsExcel)
+ {
+     //Split only Licenses products (PC_1_C__c) and Preserve other products without splitting but with AdditionalDisc calculation
+     System.debug('oppProdsExcel Count:'+oppProdsExcel.size());
+     List<dm_Split_ForQLImport__c> forInsert = new List<dm_Split_ForQLImport__c>();
+     Map<Id,List<dm_OpportunityProducts__c>> prodToOppProdMap = new  Map<Id,List<dm_OpportunityProducts__c>>();
+   	 //Get theCurrent PriceBook unit price for each opp prod
+   	 Map<Id,PriceBookEntry> oppProdWithPBPriceMap = new Map<Id,PriceBookEntry>();
+     //Get the Current Dimension for each prod
+   	 Map<Id,String > productToDimensionMap = new Map<Id,String>();
+     // Get the Unique Products and it's Price book details 
+   	 for(dm_OpportunityProducts__c oppProd :oppProdsExcel)
+     {
+        /* if(prodToOppProdMap.containsKey(oppProd.PRODUCT2ID__c))
+         prodToOppProdMap.get(oppProd.PRODUCT2ID__c).add(oppProd);
+         else prodToOppProdMap.put(oppProd.PRODUCT2ID__c,new List<dm_OpportunityProducts__c>{oppProd});*/
+         if(prodToOppProdMap.containsKey(oppProd.dm_ProductId_New__c))
+         prodToOppProdMap.get(oppProd.dm_ProductId_New__c).add(oppProd);
+         else prodToOppProdMap.put(oppProd.dm_ProductId_New__c,new List<dm_OpportunityProducts__c>{oppProd});
+         
+     }
+    //Price Book Entries
+     Id pbId = [Select Id from PriceBook2 where Name = 'Standard Price Book'].Id;
+     List<PricebookEntry> pbEntries = [SELECT PriceBookEntryId__c,Product2.Name, Pricebook2Id, Product2Id,Product2.PC_1__c, UnitPrice FROM PricebookEntry 
+                                   where Pricebook2Id = :pbId and Product2Id in :prodToOppProdMap.keySet()];
+    //Get the Unit Proce for each product
+     for(PricebookEntry pbe : pbEntries)
+     {
+         if(prodToOppProdMap.containsKey(pbe.Product2Id))
+         {
+             List<dm_OpportunityProducts__c> temp = prodToOppProdMap.get(pbe.Product2Id);
+             if(temp.size()>0)
+             {
+                 for(dm_OpportunityProducts__c obj :temp)
+                 {
+                    oppProdWithPBPriceMap.put(obj.Id,pbe);
+                 }
+             }
+         
+         }
+     }
+     //Price Dimension
+     List<SBQQ__Dimension__c> dimensions = [SELECT Id,Name,SBQQ__PriceBook__c, SBQQ__PriceEditable__c, SBQQ__Product__c, 
+                                       SBQQ__UnitPrice__c FROM SBQQ__Dimension__c where 
+                                            SBQQ__Product__c in : prodToOppProdMap.keySet() ];
+     //Map the Product with Dimention
+     for(SBQQ__Dimension__c dimen : dimensions) 
+     {
+         if(prodToOppProdMap.containsKey(dimen.SBQQ__Product__c))
+         productToDimensionMap.put(dimen.SBQQ__Product__c,dimen.Id);
+     }
+     for(dm_OpportunityProducts__c oppProdObj : oppProdsExcel)
+     {
+         //obj.Order_Start_Date__c
+         //obj.Order_End_Date__c
+         //obj.Term__c
+         Integer term = Integer.valueOf(Math.ceil(oppProdObj.TERM_C__c));//Round off to the lowest value e.g 28.9 means 28
+		 Integer YEAR = 12; 
+         Integer loopCount = term/YEAR ;//Get the Integer value
+         //Get the Mod value , that should be added to the last date's month 
+         //E.g 25 months = 12 months for 2 years and one month for last one.
+         Integer modValue = Math.mod(term,YEAR);
+         Date startDate = oppProdObj.START_DATE_C__c;
+         Date endDate = oppProdObj.END_DATE_C__c;
+         Date startDateFromLoop = null;
+         Date endDateFromLoop = null;
+         System.debug('Start Date:'+oppProdObj.START_DATE_C__c+'  End Date: '+oppProdObj.END_DATE_C__c);
+         //Calculate the Additional Disc
+         System.debug('modValue:'+modValue);
+         System.debug('loopCount:'+loopCount);
+         System.debug('Term__c:'+oppProdObj.TERM_C__c);
+         System.debug('Quantity:'+oppProdObj.QUANTITY__c);
+         System.debug('Opp Prod Total Price:'+oppProdObj.TOTALPRICE__c); 
+         System.debug('Price Book Val:'+oppProdWithPBPriceMap.get(oppProdObj.Id)); 
+         Decimal defPriceBasedonPB = 0;//(oppProdWithPBPriceMap.get(oppProdObj.Id)) * oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c;
+         String dimension = productToDimensionMap.get(oppProdObj.dm_ProductId_New__c);
+         //oppProd.PRODUCT_NAME_C__c Mavenlink Enterprise License-CPQ ='01t78000000tzvrAAA' 
+         // Edition: Custom Integration-CPQ = '01t78000000tzxqAAA'
+         //Edition: Jira-CPQ = 01t78000000tzwSAAQ 
+         //Decimal matchedPrice = defPriceBasedonPB - additionalDiscAmount;
+         //System.debug('matchedPrice:'+matchedPrice);
+         //Get the Order Date Difference to verify the term -Sometimes the dates are b/w year and the term is 36
+         //Add Licenses product category check- to split only those records.
+        //////TTTTTTTTTTTTTTTTTTOOOOOOOOOOOOOOOOOOOO- Enable INSERT&&&&&&&&&&&&&&&&&&&&&&&&&&&&&%%%%%%%%%%%%%%%%%%%%%
+         if('Account Credit - Licenses-CPQ' == oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.Name)
+         {System.debug('Product Err:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c);
+          System.debug('Product Err Name:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.Name);}
+         //System.debug('Product Err:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c);
+         if(loopCount > 0 && startDate.monthsBetween(endDate) > 12 && oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c == LICENSES_PRODUCT_CATEGORY)//oppProdObj.PC_1_C__c == LICENSES_PRODUCT_CATEGORY )
+         {
+           //Create the Split Records for the QL
+           for(Integer i=0;i< loopCount ;i++)  
+           {
+               if(i == 0){
+               Date newStartDate = Date.newInstance(startDate.year(), startDate.month(), startDate.day());
+               Date newEndDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()-1);
+               System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+                newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         		Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         		Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         		Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         		//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;//YEAR * oppProdObj.QUANTITY__c * discPricePerUnit;
+                Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+                System.debug('Old Disc Price:'+oldDiscPrice);
+         		System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		//System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+                System.debug(' oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice); 
+                if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                   else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                        //newObj.Discount__c = 0;
+                       }
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                        //newObj.AdditionalDiscAmountTemp__c = 0;
+                       }
+                   }
+         		System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                newObj.BillingType__c = 'Advance';
+                newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                newObj.Opportunity_Product__c = oppProdObj.Id;
+                newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+                newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+                newObj.DefaultSubscriptionTerm__c = 1;
+         		newObj.SubscriptionTerm__c = YEAR;
+         		newObj.SubscriptionPricing__c = 'Fixed Price';
+         		newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         		//newObj.BillingFrequency__c = 'Annual';
+                newObj.ChargeType__c = 'Recurring';
+                newObj.Dimension__c = dimension;
+                newObj.SegmentLabel__c = 'Year '+(i+1);
+                newObj.SegmentIndex__c = i+1;
+                newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+         		newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+                newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+                //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;
+                //newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+                newObj.Start_Date__c = newStartDate;
+                newObj.End_Date__c = newEndDate;
+                //newObj.Opportunity_Product__c = oppProdObj.Id;//OPPPRODID_C__c;
+               //System.debug('Loop '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               forInsert.add(newObj);     
+               }
+               else{
+                   if(startDateFromLoop == null){
+                       Date newStartDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day());
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       //System.debug('Loop null'+i+':Start Date: '+ newStartDate);
+               		   //System.debug('Loop null'+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       System.debug('Loop null'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   System.debug('Loop null'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                        dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+                        newObj.BillingType__c = 'Advance';
+                        newObj.Opportunity_Product__c = oppProdObj.Id;
+                        newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+            		    newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+               		    newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               			newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               			newObj.Quantity__c = oppProdObj.QUANTITY__c;
+                        newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                        newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+              		    //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               		    //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+                       Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         				Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         				Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         				Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         				//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;// YEAR * oppProdObj.QUANTITY__c * discPricePerUnit;
+                       Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                		newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                		if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                		{
+                    		newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    		//newObj.Discount__c = 0;
+                		}
+                   		else {
+                      		 if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                             {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                              //newObj.Discount__c = 0;
+                             }
+                      		 else 
+                        	//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                        	newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                            //newObj.AdditionalDiscAmountTemp__c = 0;
+                   		}
+                       newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                       System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+                       System.debug('Old Disc Price:'+oldDiscPrice);
+         		       System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		       //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         				//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+         				System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				//newObj.BillingFrequency__c = 'Annual';
+                        newObj.ChargeType__c = 'Recurring';
+                        newObj.Dimension__c = dimension;
+                        newObj.SegmentLabel__c = 'Year '+(i+1);
+                        newObj.SegmentIndex__c = i+1;
+                        newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+                        newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               			newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               			//newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;
+               			//newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               			newObj.Start_Date__c = newStartDate;
+               			newObj.End_Date__c = newEndDate;
+                        //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+                      // System.debug('Loop null '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               			forInsert.add(newObj);     
+                   }
+                   else{
+                        //System.debug('Loop before'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   //System.debug('Loop before'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                       Date newStartDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month(),endDateFromLoop.day()+1);
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               		   System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+                       newObj.BillingType__c = 'Advance';
+                       newObj.Opportunity_Product__c = oppProdObj.Id;
+                       newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+            		   newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+                       newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               		   newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               		   newObj.Quantity__c = oppProdObj.QUANTITY__c;
+                       newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                       newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+                       Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                       newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                		//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+         				System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				//newObj.BillingFrequency__c = 'Annual';
+               		   //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               			//{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+				        Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         				Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         				Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         				Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         				//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;//YEAR * oppProdObj.QUANTITY__c * discPricePerUnit; 
+                                      			System.debug('Old Disc Price:'+oldDiscPrice);
+                       System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+         				System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         				//System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         				newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               			newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               			//newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;//newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               		   newObj.Start_Date__c = newStartDate;
+               		   newObj.End_Date__c = newEndDate;
+                       //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+                       System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				newObj.BillingFrequency__c = 'Annual';
+                        newObj.ChargeType__c = 'Recurring';
+                        newObj.Dimension__c = dimension;
+                        newObj.SegmentLabel__c = 'Year '+(i+1);
+                        newObj.SegmentIndex__c = i+1;
+                        newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+                       if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                		{
+                    		newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    		//newObj.Discount__c = 0;
+               			 }
+                  	 else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                        //newObj.Discount__c = 0;
+                       }
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0;
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;}
+                   }
+                   newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                       //System.debug('Loop '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               		   forInsert.add(newObj);  
+                   }
+               
+               
+               }
+           }
+           if(modValue != null && modValue > 0)
+           {
+                Date newStartDate = null;
+               if(endDateFromLoop == null){
+                       newStartDate = endDateFromLoop = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()+1);
+               }
+               else 
+               newStartDate = endDateFromLoop+1;//Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month()+modValue,0);
+               Date newEndDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month()+modValue,endDateFromLoop.day());//+1);
+			   System.debug('Mod '+':Start Date: '+newStartDate);
+               System.debug('Mod '+':End Date: '+ newEndDate);
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               newObj.BillingType__c = 'Advance';
+               newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+               newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+               //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+               Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+               Decimal originalSalePriceForQL = perMonthCost * modValue;
+         	   Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+        	   Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+        	   //Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*modValue;//modValue * oppProdObj.QUANTITY__c * discPricePerUnit; 
+               Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+               newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/modValue : 0;
+               if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * modValue * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {//newObj.Discount__c = 0;
+                        newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * modValue * (-1);}
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0; 
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;}
+                   }
+                newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+               System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+               newObj.Opportunity_Product__c = oppProdObj.Id;
+               newObj.DefaultSubscriptionTerm__c = 1;
+         		newObj.SubscriptionTerm__c = modValue;
+         		newObj.SubscriptionPricing__c = 'Fixed Price';
+         		newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         		//newObj.BillingFrequency__c = 'Annual';
+               newObj.ChargeType__c = 'Recurring';
+               newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+               newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+               newObj.Dimension__c = dimension;
+               newObj.SegmentLabel__c = 'Year '+(loopCount+1);
+               newObj.SegmentIndex__c = loopCount+1;
+               newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+               System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+               System.debug('Old Disc Price:'+oldDiscPrice);
+         	   System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         	   //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         
+               newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;// newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c;// * (oppProdObj.TERM_C__c-(loopCount * YEAR));
+       		   newObj.Start_Date__c = newStartDate;
+       		   newObj.End_Date__c = newEndDate;
+               //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+               //System.debug('Mod '+':additionalDiscAmount: '+ additionalDiscAmount);
+      		   forInsert.add(newObj);  
+           }
+         }
+         else
+         {
+             //Nomultiple year, lesser than 12 - single year or Services Product
+             Integer monthsBetweenDates = startDate.monthsBetween(endDate);
+             dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+             newObj.Opportunity_Product__c = oppProdObj.Id;
+             newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+             newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+             newObj.Quote__c = oppProdObj.Quote_Temp__c;
+             newObj.Quantity__c = oppProdObj.QUANTITY__c;
+             newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+             newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+             //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+             //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+             Decimal perMonthCost =  monthsBetweenDates ==0 ? 0 : oppProdObj.TOTALPRICE__c/monthsBetweenDates;
+         	 Decimal originalSalePriceForQL = monthsBetweenDates ==0 ? 0 : perMonthCost * monthsBetweenDates;
+         	 Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         	 Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         	 //Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c) * monthsBetweenDates;//monthsBetweenDates * oppProdObj.QUANTITY__c * discPricePerUnit; 
+             //Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+               newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c ;
+             if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * monthsBetweenDates * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                   else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {//newObj.Discount__c = 0;
+                        newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * monthsBetweenDates * (-1);}
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0;
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice) * 100;}
+                   }
+             newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+             System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);	
+             // newObj.DefaultSubscriptionTerm__c = 1;
+             newObj.SubscriptionTerm__c = oppProdObj.TERM_C__c;
+             newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+             newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+         	 //newObj.SubscriptionPricing__c = 'Fixed Price';
+             newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         	 //newObj.BillingFrequency__c = 'Annual';
+             newObj.ChargeType__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c == LICENSES_PRODUCT_CATEGORY ? 'Recurring' :'One-Time';
+             newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+             System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+             System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+             System.debug('Old Disc Price:'+oldDiscPrice);
+        	 System.debug('Disc Price Per Unit:'+discPricePerUnit);
+          	 //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+           
+             newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+             newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+             //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;//newObj.List_Unit_Price__c = oppProdObj.LISTPRICE__c;
+             newObj.Start_Date__c = oppProdObj.START_DATE_C__c;
+             newObj.End_Date__c = oppProdObj.END_DATE_C__c;
+             //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+             System.debug('Single Year Start Date:'+oppProdObj.START_DATE_C__c);
+               System.debug('Single Year End Date:'+ oppProdObj.END_DATE_C__c);
+            // System.debug('Single Year '+':additionalDiscAmount: '+ additionalDiscAmount);
+             forInsert.add(newObj); 
+         }
+     }
+     if(forInsert.size()>0)
+         Database.insert(forInsert);
+ 
+ }
+ //Pre Process - Load Prod Id for CPQ Prods, Get the Opp Prod Count for each opp
+ public static void updateOppProdsCountForEachOpp(List<dm_OpportunityProducts__c> oppProdCountForOpp)
+ {
+     //Get the Opp To Opp Prod in a map
+	 Map<Id,List<dm_OpportunityProducts__c>> oppToOppProdMap = new Map<Id,List<dm_OpportunityProducts__c>>();
+     //Get the Count map for Records update
+     Map<Id,Integer> oppToOppProdCountMap = new Map<Id,Integer>();
+     //Update records
+     List<dm_OpportunityProducts__c> forUpdateOppProds = new List<dm_OpportunityProducts__c>();
+     for(dm_OpportunityProducts__c oppProdObj : oppProdCountForOpp)
+     {
+         if(oppToOppProdMap.containsKey(oppProdObj.OPPORTUNITYID__c))
+             oppToOppProdMap.get(oppProdObj.OPPORTUNITYID__c).add(oppProdObj);
+         else oppToOppProdMap.put(oppProdObj.OPPORTUNITYID__c,new List<dm_OpportunityProducts__c>{oppProdObj});
+     }
+      for(dm_OpportunityProducts__c oppProdObj : oppProdCountForOpp)
+     {
+         if(oppToOppProdMap.containsKey(oppProdObj.OPPORTUNITYID__c))
+         {
+             List<dm_OpportunityProducts__c> oppProsTemp = oppToOppProdMap.get(oppProdObj.OPPORTUNITYID__c);
+             if(! oppToOppProdCountMap.containsKey(oppProdObj.OPPORTUNITYID__c))
+                 oppToOppProdCountMap.put(oppProdObj.OPPORTUNITYID__c,oppProsTemp.size());
+          }
+     }
+     //Update the Opp products
+     for(dm_OpportunityProducts__c oppProdObj : oppProdCountForOpp)
+     {
+         if(oppToOppProdCountMap.containsKey(oppProdObj.OPPORTUNITYID__c)){
+             oppProdObj.dm_Opp_Prod_Count_for_Opp__c = oppToOppProdCountMap.get(oppProdObj.OPPORTUNITYID__c);
+             forUpdateOppProds.add(oppProdObj);
+         }
+     }
+     if(forUpdateOppProds.size()>0)
+         update forUpdateOppProds;
+ }
+  public static void splitLogicWithDiscountPrice( List<dm_OpportunityProducts__c> oppProdsExcel)
+ {
+     //Split only Licenses products (PC_1_C__c) and Preserve other products without splitting but with AdditionalDisc calculation
+     System.debug('oppProdsExcel Count:'+oppProdsExcel.size());
+     List<dm_Split_ForQLImport__c> forInsert = new List<dm_Split_ForQLImport__c>();
+     Map<Id,List<dm_OpportunityProducts__c>> prodToOppProdMap = new  Map<Id,List<dm_OpportunityProducts__c>>();
+   	 //Get theCurrent PriceBook unit price for each opp prod
+   	 Map<Id,Decimal> oppProdWithPBPriceMap = new Map<Id,Decimal>();
+     // Get the Unique Products and it's Price book details 
+   	 for(dm_OpportunityProducts__c oppProd :oppProdsExcel)
+     {
+        if(prodToOppProdMap.containsKey(oppProd.PRODUCT2ID__c))
+         prodToOppProdMap.get(oppProd.PRODUCT2ID__c).add(oppProd);
+         else prodToOppProdMap.put(oppProd.PRODUCT2ID__c,new List<dm_OpportunityProducts__c>{oppProd});
+     }
+     Id pbId = [Select Id from PriceBook2 where Name = 'Standard Price Book'].Id;
+     List<PricebookEntry> pbEntries = [SELECT PriceBookEntryId__c, Pricebook2Id, Product2Id, Id, UnitPrice FROM PricebookEntry 
+                                   where Pricebook2Id = :pbId and Product2Id in :prodToOppProdMap.keySet()];
+    //Get the Unit Proce for each product
+     for(PricebookEntry pbe : pbEntries)
+     {
+         if(prodToOppProdMap.containsKey(pbe.Product2Id))
+         {
+             List<dm_OpportunityProducts__c> temp = prodToOppProdMap.get(pbe.Product2Id);
+             if(temp.size()>0)
+             {
+                 for(dm_OpportunityProducts__c obj :temp)
+                 {
+                     if( prodToOppProdMap.containsKey(obj.PRODUCT2ID__c))
+                     { 
+                         if(obj.PRODUCT_NAME_C__c == 'Mavenlink Enterprise License')
+                         	oppProdWithPBPriceMap.put(obj.Id,89.50);
+                         else if(obj.PRODUCT_NAME_C__c == 'Edition: Custom Integration')
+                             oppProdWithPBPriceMap.put(obj.Id,3000.00);
+                         else if (obj.PRODUCT_NAME_C__c == 'Edition: Jira')
+                             oppProdWithPBPriceMap.put(obj.Id,3000.00);
+                         else if (obj.PRODUCT_NAME_C__c == 'Custom SOW-CPQ')
+                             oppProdWithPBPriceMap.put(obj.Id,200.00);
+                         else oppProdWithPBPriceMap.put(obj.Id,pbe.UnitPrice);
+                     }
+                 }
+             }
+         
+         }
+     }
+     for(dm_OpportunityProducts__c oppProdObj : oppProdsExcel)
+     {
+         //obj.Order_Start_Date__c
+         //obj.Order_End_Date__c
+         //obj.Term__c
+         Integer term = Integer.valueOf(Math.ceil(oppProdObj.TERM_C__c));//Round off to the lowest value e.g 28.9 means 28
+		 Integer YEAR = 12; 
+         Integer loopCount = term/YEAR ;//Get the Integer value
+         //Get the Mod value , that should be added to the last date's month 
+         //E.g 25 months = 12 months for 2 years and one month for last one.
+         Integer modValue = Math.mod(term,YEAR);
+         Date startDate = oppProdObj.START_DATE_C__c;
+         Date endDate = oppProdObj.END_DATE_C__c;
+         Date startDateFromLoop = null;
+         Date endDateFromLoop = null;
+         System.debug('Start Date:'+oppProdObj.START_DATE_C__c+'  End Date: '+oppProdObj.END_DATE_C__c);
+         //Calculate the Additional Disc
+         System.debug('modValue:'+modValue);
+         System.debug('loopCount:'+loopCount);
+         System.debug('Term__c:'+oppProdObj.TERM_C__c);
+         System.debug('Quantity:'+oppProdObj.QUANTITY__c);
+         System.debug('Opp Prod Total Price:'+oppProdObj.TOTALPRICE__c); 
+         System.debug('Price Book Val:'+oppProdWithPBPriceMap.get(oppProdObj.Id)); 
+         Decimal defPriceBasedonPB = (oppProdWithPBPriceMap.get(oppProdObj.Id)) * oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c;
+         
+         //oppProd.PRODUCT_NAME_C__c Mavenlink Enterprise License-CPQ ='01t78000000tzvrAAA' 
+         // Edition: Custom Integration-CPQ = '01t78000000tzxqAAA'
+         //Edition: Jira-CPQ = 01t78000000tzwSAAQ 
+         //Decimal matchedPrice = defPriceBasedonPB - additionalDiscAmount;
+         //System.debug('matchedPrice:'+matchedPrice);
+         //Get the Order Date Difference to verify the term -Sometimes the dates are b/w year and the term is 36
+         //Add Licenses product category check- to split only those records.
+         if(loopCount > 0 && startDate.monthsBetween(endDate) > 12 && oppProdObj.PC_1_C__c == LICENSES_PRODUCT_CATEGORY )
+         {
+           //Create the Split Records for the QL
+           for(Integer i=0;i< loopCount ;i++)  
+           {
+               if(i == 0){
+               Date newStartDate = Date.newInstance(startDate.year(), startDate.month(), startDate.day());
+               Date newEndDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()-1);
+               System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               if(oppProdObj.PRODUCT_NAME_C__c == 'Mavenlink Enterprise License')
+               newObj.Product__c = '01t78000000tzvrAAA';
+               else if(oppProdObj.PRODUCT_NAME_C__c == 'Edition: Custom Integration')
+               newObj.Product__c = '01t78000000tzxqAAA';
+               else if (oppProdObj.PRODUCT_NAME_C__c == 'Edition: Jira')
+			   newObj.Product__c = '01t78000000tzwSAAQ';
+               else if(oppProdObj.PRODUCT_NAME_C__c == 'Custom SOW')
+               newObj.Product__c = '01t78000000tzy2AAA';
+               else
+               newObj.Product__c = oppProdObj.PRODUCT2ID__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id);
+               //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+                Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         		Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         		Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         		Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id) -oldDiscPrice;
+         		Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;//YEAR * oppProdObj.QUANTITY__c * discPricePerUnit;
+                Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                newObj.List_Unit_Price__c = withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+                System.debug('Old Disc Price:'+oldDiscPrice);
+         		System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         
+               newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;
+               //newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               newObj.Start_Date__c = newStartDate;
+               newObj.End_Date__c = newEndDate;
+               newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+               System.debug('Loop '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               forInsert.add(newObj);     
+               }
+               else{
+                   if(startDateFromLoop == null){
+                       Date newStartDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day());
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       //System.debug('Loop null'+i+':Start Date: '+ newStartDate);
+               		   //System.debug('Loop null'+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       System.debug('Loop null'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   System.debug('Loop null'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                        dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               		   if(oppProdObj.PRODUCT_NAME_C__c == 'Mavenlink Enterprise License')
+               		   newObj.Product__c = '01t78000000tzvrAAA';
+                       else if(oppProdObj.PRODUCT_NAME_C__c == 'Edition: Custom Integration')
+                       newObj.Product__c = '01t78000000tzxqAAA';
+                       else if (oppProdObj.PRODUCT_NAME_C__c == 'Edition: Jira')
+			           newObj.Product__c = '01t78000000tzwSAAQ';
+                       else if(oppProdObj.PRODUCT_NAME_C__c == 'Custom SOW')
+               			newObj.Product__c = '01t78000000tzy2AAA';
+                       else 
+                       newObj.Product__c = oppProdObj.PRODUCT2ID__c;
+               			newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               			newObj.Quantity__c = oppProdObj.QUANTITY__c;
+                        newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id);
+              		    //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               		    //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+                       Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         				Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         				Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         				Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id) -oldDiscPrice;
+         				Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;// YEAR * oppProdObj.QUANTITY__c * discPricePerUnit;
+                       Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                		newObj.List_Unit_Price__c = withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                
+                       System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+                       System.debug('Old Disc Price:'+oldDiscPrice);
+         		System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         
+                       newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               			newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               			newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;
+               			//newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               			newObj.Start_Date__c = newStartDate;
+               			newObj.End_Date__c = newEndDate;
+                        newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+                       System.debug('Loop null '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               			forInsert.add(newObj);     
+                   }
+                   else{
+                        //System.debug('Loop before'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   //System.debug('Loop before'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                       Date newStartDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month(),endDateFromLoop.day()+1);
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               		   System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               		   if(oppProdObj.PRODUCT_NAME_C__c == 'Mavenlink Enterprise License')
+               			newObj.Product__c = '01t78000000tzvrAAA';
+               			else if(oppProdObj.PRODUCT_NAME_C__c == 'Edition: Custom Integration')
+               			newObj.Product__c = '01t78000000tzxqAAA';//CPQ
+               			else if (oppProdObj.PRODUCT_NAME_C__c == 'Edition: Jira')
+			   			newObj.Product__c = '01t78000000tzwSAAQ';
+                       else if(oppProdObj.PRODUCT_NAME_C__c == 'Custom SOW')
+               			newObj.Product__c = '01t78000000tzy2AAA';
+               			else
+                       newObj.Product__c = oppProdObj.PRODUCT2ID__c;
+               		   newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               		   newObj.Quantity__c = oppProdObj.QUANTITY__c;
+                       newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id);
+                       Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                newObj.List_Unit_Price__c = withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                
+               		   //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               			//{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+				       Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         				Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         				Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         				Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id) -oldDiscPrice;
+         				Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;//YEAR * oppProdObj.QUANTITY__c * discPricePerUnit; 
+                                      			System.debug('Old Disc Price:'+oldDiscPrice);
+                       System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+         		System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         
+                       
+                       newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               			newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               			newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;//newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               		   newObj.Start_Date__c = newStartDate;
+               		   newObj.End_Date__c = newEndDate;
+                       newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+                       System.debug('Loop '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               		   forInsert.add(newObj);  
+                   }
+               
+               
+               }
+           }
+           if(modValue != null && modValue > 0)
+           {
+                Date newStartDate = null;
+               if(endDateFromLoop == null){
+                       newStartDate = endDateFromLoop = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()+1);
+               }
+               else 
+               newStartDate = endDateFromLoop+1;//Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month()+modValue,0);
+               Date newEndDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month()+modValue,endDateFromLoop.day());//+1);
+			   System.debug('Mod '+':Start Date: '+newStartDate);
+               System.debug('Mod '+':End Date: '+ newEndDate);
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               if(oppProdObj.PRODUCT_NAME_C__c == 'Mavenlink Enterprise License')
+               newObj.Product__c = '01t78000000tzvrAAA';
+               else if(oppProdObj.PRODUCT_NAME_C__c == 'Edition: Custom Integration')
+               newObj.Product__c = '01t78000000tzxqAAA';
+               else if (oppProdObj.PRODUCT_NAME_C__c == 'Edition: Jira')
+			   newObj.Product__c = '01t78000000tzwSAAQ';
+               else if(oppProdObj.PRODUCT_NAME_C__c == 'Custom SOW')
+               newObj.Product__c = '01t78000000tzy2AAA';
+               else
+               newObj.Product__c = oppProdObj.PRODUCT2ID__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id);
+               //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+               Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+               Decimal originalSalePriceForQL = perMonthCost * modValue;
+         	   Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+        	   Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id) -oldDiscPrice;
+        	   Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*modValue;//modValue * oppProdObj.QUANTITY__c * discPricePerUnit; 
+               Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+               newObj.List_Unit_Price__c = withSalesPrice >0 ? withSalesPrice/modValue : 0;
+                
+               System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+               System.debug('Old Disc Price:'+oldDiscPrice);
+         	   System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         	   System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         
+               newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;// newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c;// * (oppProdObj.TERM_C__c-(loopCount * YEAR));
+       		   newObj.Start_Date__c = newStartDate;
+       		   newObj.End_Date__c = newEndDate;
+               newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+               System.debug('Mod '+':additionalDiscAmount: '+ additionalDiscAmount);
+      		   forInsert.add(newObj);  
+           }
+         }
+         else
+         {
+             //Nomultiple year, lesser than 12 - single year
+             Integer monthsBetweenDates = startDate.monthsBetween(endDate);
+             dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+             if(oppProdObj.PRODUCT_NAME_C__c == 'Mavenlink Enterprise License')
+               newObj.Product__c = '01t78000000tzvrAAA';
+               else if(oppProdObj.PRODUCT_NAME_C__c == 'Edition: Custom Integration')
+               newObj.Product__c = '01t78000000tzxqAAA';
+               else if (oppProdObj.PRODUCT_NAME_C__c == 'Edition: Jira')
+			   newObj.Product__c = '01t78000000tzwSAAQ';
+               else if(oppProdObj.PRODUCT_NAME_C__c == 'Custom SOW')
+               newObj.Product__c = '01t78000000tzy2AAA';
+               else
+             newObj.Product__c = oppProdObj.PRODUCT2ID__c;
+             newObj.Quote__c = oppProdObj.Quote_Temp__c;
+             newObj.Quantity__c = oppProdObj.QUANTITY__c;
+             newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id);
+             //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+             //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+             Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/monthsBetweenDates;
+         	 Decimal originalSalePriceForQL = perMonthCost * monthsBetweenDates;
+         	 Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         	 Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id) -oldDiscPrice;
+         	 Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*monthsBetweenDates;//monthsBetweenDates * oppProdObj.QUANTITY__c * discPricePerUnit; 
+             //Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+               newObj.List_Unit_Price__c = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c ;
+               
+             System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+             System.debug('Old Disc Price:'+oldDiscPrice);
+         		System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         
+             newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+             newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+             newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;//newObj.List_Unit_Price__c = oppProdObj.LISTPRICE__c;
+             newObj.Start_Date__c = oppProdObj.START_DATE_C__c;
+             newObj.End_Date__c = oppProdObj.END_DATE_C__c;
+             newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+             System.debug('Single Year Start Date:'+oppProdObj.START_DATE_C__c);
+               System.debug('Single Year End Date:'+ oppProdObj.END_DATE_C__c);
+             System.debug('Single Year '+':additionalDiscAmount: '+ additionalDiscAmount);
+             forInsert.add(newObj); 
+         }
+     }
+     if(forInsert.size()>0)
+         Database.insert(forInsert);
+ 
+ }
+ public static void splitLogic( List<dm_OpportunityProducts__c> oppProdsExcel)
+ {
+     System.debug('oppProdsExcel Count:'+oppProdsExcel.size());
+     List<dm_Split_ForQLImport__c> forInsert = new List<dm_Split_ForQLImport__c>();
+     for(dm_OpportunityProducts__c oppProdObj : oppProdsExcel)
+     {
+         //obj.Order_Start_Date__c
+         //obj.Order_End_Date__c
+         //obj.Term__c
+         Integer term = Integer.valueOf(Math.ceil(oppProdObj.TERM_C__c));//Round off to the lowest value e.g 28.9 means 28
+         Integer YEAR = 12;
+         Integer loopCount = term/YEAR ;//Get the Integer value
+         //Get the Mod value , that should be added to the last date's month 
+         //E.g 25 months = 12 months for 2 years and one month for last one.
+         Integer modValue = Math.mod(term,YEAR);
+         System.debug('modValue:'+modValue);
+         System.debug('loopCount:'+loopCount);
+         System.debug('Term__c:'+oppProdObj.TERM_C__c);
+         Date startDate = oppProdObj.START_DATE_C__c;
+         Date endDate = oppProdObj.END_DATE_C__c;
+         Date startDateFromLoop = null;
+         Date endDateFromLoop = null;
+         System.debug('Start Date:'+oppProdObj.START_DATE_C__c+'  End Date: '+oppProdObj.END_DATE_C__c);
+         //Get the Order Date Difference to verify the term - to do
+         if(loopCount > 0 )//&& loopCount == (endDate() - startDate()))
+         {
+           //Create the Split Records for the QL
+           for(Integer i=0;i< loopCount ;i++)  
+           {
+               if(i == 0){
+               Date newStartDate = Date.newInstance(startDate.year(), startDate.month(), startDate.day());
+               Date newEndDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()-1);
+               System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               newObj.Product__c = oppProdObj.PRODUCT2ID__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               newObj.Start_Date__c = newStartDate;
+               newObj.End_Date__c = newEndDate;
+               newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+               forInsert.add(newObj);     
+               }
+               else{
+                   if(startDateFromLoop == null){
+                       Date newStartDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day());
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       //System.debug('Loop null'+i+':Start Date: '+ newStartDate);
+               		   //System.debug('Loop null'+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       System.debug('Loop null'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   System.debug('Loop null'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                        dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               		    newObj.Product__c = oppProdObj.PRODUCT2ID__c;
+               			newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               			newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               			newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               			newObj.Start_Date__c = newStartDate;
+               			newObj.End_Date__c = newEndDate;
+                        newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+               			forInsert.add(newObj);     
+                   }
+                   else{
+                        //System.debug('Loop before'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   //System.debug('Loop before'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                       Date newStartDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month(),endDateFromLoop.day()+1);
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               		   System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               		   newObj.Product__c = oppProdObj.PRODUCT2ID__c;
+               		   newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               		   newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               		   newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               		   newObj.Start_Date__c = newStartDate;
+               		   newObj.End_Date__c = newEndDate;
+                       newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+               		   forInsert.add(newObj);  
+                   }
+               
+               
+               }
+           }
+           if(modValue != null && modValue > 0)
+           {
+                Date newStartDate = null;
+               if(endDateFromLoop == null){
+                       newStartDate = endDateFromLoop = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()+1);
+               }
+               else 
+               newStartDate = endDateFromLoop+1;//Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month()+modValue,0);
+               Date newEndDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month()+modValue,endDateFromLoop.day());//+1);
+			   System.debug('Mod '+':Start Date: '+newStartDate);
+               System.debug('Mod '+':End Date: '+ newEndDate);
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               newObj.Product__c = oppProdObj.PRODUCT2ID__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c;// * (oppProdObj.TERM_C__c-(loopCount * YEAR));
+       		   newObj.Start_Date__c = newStartDate;
+       		   newObj.End_Date__c = newEndDate;
+               newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+      		   forInsert.add(newObj);  
+           }
+         }
+         else
+         {
+             //Nomultiple year, lesser than 12 - single year
+             dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+             newObj.Product__c = oppProdObj.PRODUCT2ID__c;
+             newObj.Quote__c = oppProdObj.Quote_Temp__c;
+             newObj.Quantity__c = oppProdObj.QUANTITY__c;
+             newObj.List_Unit_Price__c = oppProdObj.LISTPRICE__c;
+             newObj.Start_Date__c = oppProdObj.START_DATE_C__c;
+             newObj.End_Date__c = oppProdObj.END_DATE_C__c;
+             newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+             System.debug('Single Year Start Date:'+oppProdObj.START_DATE_C__c);
+               System.debug('Single Year End Date:'+ oppProdObj.END_DATE_C__c);
+             forInsert.add(newObj); 
+         }
+     }
+    // if(forInsert.size()>0)
+       //  Database.insert(forInsert);
+ 
+ }
+ public static void getQLTempForTopNQuotesForInsert(List<SBQQ__Quote__c> quotes ,List<dm_Split_ForQLImport__c> forInsertQuoteLine)
+ {
+     //Get top 10 Quotes and collect the Quotes lines for them for test.
+     //List<SBQQ__Quote__c> quotes = [Select Id,SBQQ__Account__c,SBQQ__Opportunity2__c  from SBQQ__Quote__c where DM__c = true Limit 10 ];
+	 Map<Id,SBQQ__Quote__c> quoteMap = new Map<Id,SBQQ__Quote__c>(quotes);
+     Set<Id> oppIds = new Set<Id>();
+     for(SBQQ__Quote__c q : quotes)
+     {
+         oppIds.add(q.SBQQ__Opportunity2__c);
+     }
+     System.debug('quoteMap.keySet() :'+quoteMap.keySet() );
+     //Get the Quote lines for those Opportunity Ids
+     List<dm_Split_ForQLImport__c> qlTemp = [SELECT Id,AdditionalDiscAmountTemp__c,dm_Opp_Prod_Count_for_Opp__c,Product__c, Product__r.Name,Quote__c, Quantity__c, List_Unit_Price__c, 
+                                             Start_Date__c, End_Date__c, Opportunity_Product__c, SubscriptionPricing__c,
+                                             PricebookEntryId__c, BillingFrequency__c, Quote_Group__c, SegmentKey__c,
+                                             SegmentIndex__c, SegmentLabel__c, Number__c, ChargeType__c, Dimension__c, 
+                                             Discount__c, DefaultSubscriptionTerm__c, SubscriptionTerm__c FROM
+                                             dm_Split_ForQLImport__c where
+         									 Quote__c in :quoteMap.keySet() ];
+     System.debug('qlTemp:'+qlTemp.size());
+     forInsertQuoteLine.addAll(qlTemp);
+     
+     System.debug('Opp Li Ids:'+qlTemp.size());
+ }
+  
+   public static void  sendProductsEmailWithAttachment(Map<String,dm_OpportunityProducts__c> nonMatchedCPQProductNameTodmProdMap)
+  {
+        String subject = 'Products needed For CPQ - Sandbox ';
+        String body = 'Products needed For CPQ - Sandbox';
+        // Define the email
+        Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();  
+        // Define email file attachment list
+        Messaging.EmailFileAttachment[] emailAttList = new List<Messaging.EmailFileAttachment>();
+        // Creating the CSV file 
+         if(! nonMatchedCPQProductNameTodmProdMap.isEmpty()){
+            // Creating the CSV file for error
+            String finalstr = 'OppProdId,PRODUCT2ID__c, ProductNameTest,ProductName,Account, Quantity__c, OPPORTUNITY_NAME_C__c, '
+                              + 'Opportunity_Temp__c,PricebookEntryId__c, ContractId\n';
+            String attName = 'Product_Without_Opportunities_' + system.now().format('YYYYMMDDhhmm') + '.csv';
+            for(String  oppProdIdFromTemp  : nonMatchedCPQProductNameTodmProdMap.keySet()){
+                dm_OpportunityProducts__c oppProd = nonMatchedCPQProductNameTodmProdMap.get(oppProdIdFromTemp);
+				string recordString =  oppProd.Id+'","'+oppProd.PRODUCT2ID__c+'","'+oppProdIdFromTemp+'","'+oppProd.PRODUCT_NAME_C__c+'","'+
+                    oppProd.ACCOUNT_NAME_C__c+'","'+ oppProd.Quantity__c+'","'+oppProd.OPPORTUNITY_NAME_C__c +'","'
+                    +oppProd.Opportunity_Temp__c +'","'+oppProd.PricebookEntryId__c+'","'+oppProd.CONTRACT_ID_NEW_C__c+'"\n';
+                finalstr = finalstr +recordString;
+            }
+        
+    		// Create the email attachment    
+            Messaging.EmailFileAttachment efa = new Messaging.EmailFileAttachment();
+            efa.setFileName(attName);
+            efa.setBody(Blob.valueOf(finalstr));
+            emailAttList.add(efa);
+       		} 
+            
+         // Sets the paramaters of the email
+         email.setSubject( subject );
+        //Need to get the List
+        List<User> userList = new List<User>();
+        List<String> toAddresses = new List<String>();
+        toAddresses.add('revathi.mohan@nteligroup.com');//-------------------TO DO
+        email.setToAddresses( toAddresses);
+        email.setPlainTextBody( body );
+        email.setFileAttachments(emailAttList);
+          
+        // Sends the email
+        Messaging.SendEmailResult [] r =
+        Messaging.sendEmail(new Messaging.SingleEmailMessage[] {email});
+    }
+  public static void  sendEmailWithAttachment(List<dm_Split_ForQLImport__c> qlTempList)
+  {
+        String subject = 'Quote Lines Temp for Insert to Sandbox ';
+        String body = 'Quote lines Temp for Top 10 Quotes';
+        // Define the email
+        Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();  
+        // Define email file attachment list
+        Messaging.EmailFileAttachment[] emailAttList = new List<Messaging.EmailFileAttachment>();
+        // Creating the CSV file 
+         if(! qlTempList.isEmpty()){
+            // Creating the CSV file for error
+            String finalstr = 'Id,OpportunityLineItems Count,Product__c, Product__r.Name,Quote__c, Quantity__c, List_Unit_Price__c, '
+                              + 'Start_Date__c, End_Date__c, Opportunity_Product__c, SubscriptionPricing__c,'
+                              + 'PricebookEntryId__c, BillingFrequency__c, Quote_Group__c, SegmentKey__c,'
+                              +'SegmentIndex__c, SegmentLabel__c, Number__c, ChargeType__c,'
+                              +' Discount__c, Additional Discount Amount For Free MothsONLY,DefaultSubscriptionTerm__c, SubscriptionTerm__c,Dimension__c,DM_QuoteLine__C\n';
+            String attName = 'QL_For_Import_' + system.now().format('YYYYMMDDhhmm') + '.csv';
+            for(dm_Split_ForQLImport__c  ql  : qlTempList){
+				string recordString =  ql.Id+'","'+ql.dm_Opp_Prod_Count_for_Opp__c+'","'+ql.Product__c+'","'+ql.Product__r.Name+'","'+ql.Quote__c+'","'+
+                                       ql.Quantity__c+'","'+ql.List_Unit_Price__c +'","'+ql.Start_Date__c+
+                    '","'+ql.End_Date__c+'","'+ql.Opportunity_Product__c+'","'+ql.SubscriptionPricing__c+'","'+
+                    ql.PricebookEntryId__c+'","'+ql.BillingFrequency__c+'","'+ql.Quote_Group__c+'","'+
+                    ql.SegmentKey__c+'","'+ ql.SegmentIndex__c+'","'+ql.SegmentLabel__c+'","'+ql.Number__c+
+                    '","'+ql.ChargeType__c+'","'+ql.Discount__c+'","'+ql.AdditionalDiscAmountTemp__c+'","'+ql.DefaultSubscriptionTerm__c+'","'
+                    +ql.SubscriptionTerm__c+'","'+ql.Dimension__c+'","'+'TRUE'+'"\n';
+                finalstr = finalstr +recordString;
+            }
+        
+    		// Create the email attachment    
+            Messaging.EmailFileAttachment efa = new Messaging.EmailFileAttachment();
+            efa.setFileName(attName);
+            efa.setBody(Blob.valueOf(finalstr));
+            emailAttList.add(efa);
+       		} 
+            
+         // Sets the paramaters of the email
+         email.setSubject( subject );
+        //Need to get the List
+        List<User> userList = new List<User>();
+        List<String> toAddresses = new List<String>();
+        toAddresses.add('revathi.mohan@nteligroup.com');//-------------------TO DO
+        email.setToAddresses( toAddresses);
+        email.setPlainTextBody( body );
+        email.setFileAttachments(emailAttList);
+          
+        // Sends the email
+        Messaging.SendEmailResult [] r =
+        Messaging.sendEmail(new Messaging.SingleEmailMessage[] {email});
+    }
+    public static void  sendEmailWithAttachment(List<SBQQ__QuoteLine__c> qlList)
+  {
+        String subject = 'Quote Lines Error to Sandbox ';
+        String body = 'Quote lines Error';
+        // Define the email
+        Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();  
+        // Define email file attachment list
+        Messaging.EmailFileAttachment[] emailAttList = new List<Messaging.EmailFileAttachment>();
+        // Creating the CSV file 
+         if(! qlList.isEmpty()){
+            // Creating the CSV file for error
+            String finalstr = 'Id,Name,QuoteId,SBQQ__Quote.Name,SBQQ__Product__r.Name,SBQQ__StartDate__c,SBQQ__EndDate__c,'
+                +'SBQQ__SegmentIndex__c, SBQQ__Number__c,SBQQ__SegmentKey__c, SBQQ__SegmentLabel__c,'
+                +'SBQQ__ProrateMultiplier__c,SBQQ__SubscriptionTerm__c,SBQQ__NetTotal__c,Old Opp Prod Price\n';
+            String attName = 'QL_Prorate_Conflict' + system.now().format('YYYYMMDDhhmm') + '.csv';
+            for(SBQQ__QuoteLine__c  ql  : qlList){
+				string recordString =  ql.Id+'","'+ql.Name+'","'+ql.SBQQ__Quote__r.Id+'","'+ql.SBQQ__Quote__r.Name+'","'+ql.SBQQ__Product__r.Name+'","'
+                    +ql.SBQQ__StartDate__c+'","'+ ql.SBQQ__EndDate__c+'","'+ql.SBQQ__SegmentIndex__c +'","'+
+                    ql.SBQQ__Number__c+
+                    '","'+ql.SBQQ__SegmentKey__c+'","'+ql.SBQQ__SegmentLabel__c+'","'+ql.SBQQ__ProrateMultiplier__c+'","'+
+                    ql.SBQQ__SubscriptionTerm__c+'","'+ql.SBQQ__NetTotal__c+'","'+ql.dm_OldOppProd_TotalPrice__c+'"\n';
+                finalstr = finalstr +recordString;
+            }
+        
+    		// Create the email attachment    
+            Messaging.EmailFileAttachment efa = new Messaging.EmailFileAttachment();
+            efa.setFileName(attName);
+            efa.setBody(Blob.valueOf(finalstr));
+            emailAttList.add(efa);
+       		} 
+            
+         // Sets the paramaters of the email
+         email.setSubject( subject );
+        //Need to get the List
+        List<User> userList = new List<User>();
+        List<String> toAddresses = new List<String>();
+        toAddresses.add('revathi.mohan@nteligroup.com');//-------------------TO DO
+        email.setToAddresses( toAddresses);
+        email.setPlainTextBody( body );
+        email.setFileAttachments(emailAttList);
+          
+        // Sends the email
+        Messaging.SendEmailResult [] r =
+        Messaging.sendEmail(new Messaging.SingleEmailMessage[] {email});
+    }
+    //Validate Amount
+   public static void  sendEmailWithAttachment(Map<SBQQ__Quote__c,Decimal> quoteToProdAmount)
+  {
+        String subject = 'SandBox Quote Amount with Prod Amount';
+        String body = 'Amount Validation';
+        // Define the email
+        Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();  
+        // Define email file attachment list
+        Messaging.EmailFileAttachment[] emailAttList = new List<Messaging.EmailFileAttachment>();
+        // Creating the CSV file 
+         if(! quoteToProdAmount.isEmpty()){
+            // Creating the CSV file for error
+            String finalstr = 'Quote Id,Name,Quote Total Amount,Prod Total,Quote Term,'
+                              + 'Start_Date__c, End_Date__c\n';
+            String attName = 'Quote_WithMismatchAmount_' + system.now().format('YYYYMMDDhhmm') + '.csv';
+            for(SBQQ__Quote__c  q  : quoteToProdAmount.keySet()){
+				string recordString =  q.Id+'","'+q.Name+'","'+q.SBQQ__NetAmount__c +'","'+ quoteToProdAmount.get(q)+'","'+q.SBQQ__SubscriptionTerm__c +'","'+
+                                       q.SBQQ__StartDate__c+'","'+q.SBQQ__EndDate__c+'"\n';
+                finalstr = finalstr +recordString;
+            }
+        
+    		// Create the email attachment    
+            Messaging.EmailFileAttachment efa = new Messaging.EmailFileAttachment();
+            efa.setFileName(attName);
+            efa.setBody(Blob.valueOf(finalstr));
+            emailAttList.add(efa);
+       		} 
+            
+         // Sets the paramaters of the email
+         email.setSubject( subject );
+        //Need to get the List
+        List<User> userList = new List<User>();
+        List<String> toAddresses = new List<String>();
+        toAddresses.add('revathi.mohan@nteligroup.com');//-------------------TO DO
+        email.setToAddresses( toAddresses);
+        email.setPlainTextBody( body );
+        email.setFileAttachments(emailAttList);
+          
+        // Sends the email
+        Messaging.SendEmailResult [] r =
+        Messaging.sendEmail(new Messaging.SingleEmailMessage[] {email});
+    }
+  //***********For Quote Lines (Split__c)- Quote Line Preparation
+  public static void updateQuoteLookupInOppProdExcel(List<SBQQ__Quote__c> quotes)
+ {
+     //Quote_Temp
+     Map<String,SBQQ__Quote__c> quoteMap = new Map<String,SBQQ__Quote__c>();//(quotes);
+     Set<String> oppIds = new Set<String>();
+     for(SBQQ__Quote__c obj : quotes)
+     {
+         quoteMap.put(obj.SBQQ__Opportunity2__c,obj);
+     }
+     
+	 List<dm_OpportunityProducts__c > dmOppProd = [Select Id,END_DATE_C__c,ACCOUNT_ID_C__c,OPPORTUNITYID__c,CONTRACT_ID_NEW_C__c,
+                                              START_DATE_C__c,OPPORTUNITY_NAME_C__c from dm_OpportunityProducts__c
+                                                where Quote_Temp__c = null and OPPORTUNITYID__c != null and
+                                               OPPORTUNITYID__c in :quoteMap.keySet()];
+	 List<dm_OpportunityProducts__c> forUpdate = new List<dm_OpportunityProducts__c >();
+	for(dm_OpportunityProducts__c  obj : dmOppProd)
+	{
+    if(quoteMap.containsKey(obj.OPPORTUNITYID__c))
+    { 
+        obj.Quote_Temp__c = (quoteMap.get(obj.OPPORTUNITYID__c)).Id;
+     	forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate,true);
+ }
+ /**********************dm_CPQ_Quote preparation*/
+     public static void updateOppLookupInOppProdExcel(List<Opportunity> oppList)
+ {
+     Map<String,Opportunity> oppMap = new Map<String,Opportunity>(oppList);
+     Set<String> oppNames = new Set<String>();
+     /*for(Opportunity opp : oppList)
+     {
+         oppMap.put(opp.Id,opp);
+     }*/
+     
+	 List<dm_OpportunityProducts__c > dmAcc = [Select Id,END_DATE_C__c,ACCOUNT_ID_C__c,OPPORTUNITYID__c,CONTRACT_ID_NEW_C__c,
+                                              START_DATE_C__c,OPPORTUNITY_NAME_C__c from dm_OpportunityProducts__c
+                                                where Opportunity_Temp__c = null and OPPORTUNITYID__c != null and 
+                                               OPPORTUNITYID__c in :oppMap.keySet()];
+	 List<dm_OpportunityProducts__c> forUpdate = new List<dm_OpportunityProducts__c >();
+	for(dm_OpportunityProducts__c  obj : dmAcc)
+	{
+    if(oppMap.containsKey(obj.OPPORTUNITYID__c))
+    { 
+        obj.Opportunity_Temp__c = (oppMap.get(obj.OPPORTUNITYID__c)).Id;
+     	forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+    public static void validateOppProductForQuote(List<dm_OpportunityProducts__c> oppProdList,List<dm_Sanbox_Quote_For_Import__c> forInsertQuote)
+    {
+            //Get the Opp with Account
+    Map<String,dm_OpportunityProducts__c> oppProdMap = new Map<String,dm_OpportunityProducts__c>();//oppList);
+	Set<String> oppNames = new Set<String>();
+     Map<String,dm_cpq_Quote__c> quoteOppMap = new Map<String,dm_cpq_Quote__c>();//oppList);
+	 for(dm_OpportunityProducts__c oppProd : oppProdList)
+     {
+         if(! oppProdMap.containsKey(oppProd.OPPORTUNITYID__c))
+         oppProdMap.put(oppProd.OPPORTUNITYID__c,oppProd);
+     }
+        System.debug('oppProdMap:'+oppProdMap.size());
+        List<dm_cpq_Quote__c> dmQuotes = [Select Id,Opportunity__c,dm_BillToCustomerEmail__c,Contract__c,Opportunity_Opportunity_18_Digit_Id__c,
+                                          Account__c,Opportunity_Opportunity_Name__c,Payment_Term__c,Number__c,Quote_Quote_Name__c,Opportunity_Billing_Frequency__c
+                                          from dm_cpq_Quote__c 
+                                          where Opportunity_Opportunity_Name__c != null and 
+                                      Opportunity_Opportunity_18_Digit_Id__c != null 
+                                     and Opportunity__c in :oppProdMap.keySet()];
+                                     //and Opportunity_Opportunity_Name__c in :oppProdMap.keySet()];
+     for(dm_cpq_Quote__c quoteObj : dmQuotes)
+     {
+         quoteOppMap.put(quoteObj.Opportunity__c,quoteObj);
+     }
+      System.debug('dmQuotes:'+dmQuotes.size());
+        System.debug('oppProdMap:'+oppProdMap.size());
+       
+    for(String oppId : oppProdMap.keySet())
+     {
+		if(quoteOppMap.containsKey(oppId) )
+         {
+            //System.debug('Opp Prod Contract Id:'+oppProdMap.get(oppId).CONTRACT_ID_NEW_C__c+'---Quote Contract:'+quoteOppMap.get(oppId).Contract__c); 
+             //System.debug('Opp Prod Acc Id:'+oppProdMap.get(oppId).ACCOUNT_ID_C__c+'---Quote Acc:'+quoteOppMap.get(oppId).ACCOUNT__c); 
+             
+             //dmQuote.dm_StartDate__c = oppProdMap.get(dmQuote.Opportunity_Opportunity_Name__c).START_DATE_C__c;
+             //dmQuote.dm_EndDate__c = oppProdMap.get(dmQuote.Opportunity_Opportunity_Name__c).END_DATE_C__c;
+             //forUpdateQuote.add(dmQuote);
+             dm_Sanbox_Quote_For_Import__c objQuote = new dm_Sanbox_Quote_For_Import__c();
+             objQuote.Account_c__c = oppProdMap.get(oppId).ACCOUNT_ID_C__c;
+             objQuote.Contract_c__c = oppProdMap.get(oppId).CONTRACT_ID_NEW_C__c;
+             objQuote.Opportunity_c__c = oppProdMap.get(oppId).OPPORTUNITYID__c;
+             objQuote.dm_StartDate_c__c = (oppProdMap.get(oppId)).Opportunity_Temp__r.Start_Date__c;//START_DATE_C__c;
+             objQuote.dm_EndDate_c__c = (oppProdMap.get(oppId)).Opportunity_Temp__r.End_Date__c;//END_DATE_C__c;
+             objQuote.DM_c__c = true;
+             objQuote.dm_BillToCustomerEmail_c__c = quoteOppMap.get(oppId).dm_BillToCustomerEmail__c;
+             objQuote.Number_c__c = quoteOppMap.get(oppId).Number__c;
+             objQuote.Quote_Quote_Name__c = quoteOppMap.get(oppId).Quote_Quote_Name__c ;
+             objQuote.Opportunity_Billing_Frequency_c__c = quoteOppMap.get(oppId).Opportunity_Billing_Frequency__c;
+             objQuote.Payment_Term_c__c = quoteOppMap.get(oppId).Payment_Term__c;
+             objQuote.PriceBookId__c = '01si0000002O9viAAC';
+             objQuote.Type__c = 'Quote';
+             if(! forInsertQuote.contains(objQuote))
+                forInsertQuote.add(objQuote);
+             }
+     }
+      /*  for(dm_cpq_Quote__c quoteObj : dmQuotes)
+        {
+            if(oppProdMap.containsKey(quoteObj.Opportunity__c) && String.valueOf(oppProdMap.get(quoteObj.Opportunity__c).ACCOUNT_ID_C__c) == quoteObj.Account__c.to15() )
+            {
+                quoteObj.Contract__c = oppProdMap.get(quoteObj.Opportunity__c).CONTRACT_ID_NEW_C__c;
+                forUpdateQuote.add(quoteObj);
+            }
+            
+            
+        }*/
+        
+	System.debug('Count:'+forInsertQuote.size());
+       // if(forInsertQuote.size()>0)
+       //Database.Insert(forInsertQuote); 
+    }
+ //Based on Opportunity Product records from org's excel -update CPQ Quote - Stat Date , End Date
+ public static void updateStartEndDatesInDMQuote(List<dm_OpportunityProducts__c> oppProdList)
+ {
+    //Get the Opp with Account
+    Map<String,dm_OpportunityProducts__c> oppProdMap = new Map<String,dm_OpportunityProducts__c>();//oppList);
+	Set<String> oppNames = new Set<String>();
+     List<dm_cpq_Quote__c> forUpdateQuote = new List<dm_cpq_Quote__c>();
+     for(dm_OpportunityProducts__c oppProd : oppProdList)
+     {
+         oppProdMap.put(oppProd.OPPORTUNITY_NAME_C__c,oppProd);
+     }
+    List<dm_cpq_Quote__c> dmQuotes = [Select Id,Opportunity_Opportunity_18_Digit_Id__c,Account__c,Opportunity_Opportunity_Name__c  from dm_cpq_Quote__c 
+                                          where Opportunity_Opportunity_Name__c != null and 
+                                      Opportunity_Opportunity_18_Digit_Id__c != null 
+                                     and Opportunity_Opportunity_Name__c in :oppProdMap.keySet()];
+	System.debug('dmQuotes:'+dmQuotes.size());
+     Map<String,dm_cpq_Accounts_Opps__c> oppMap = new Map<String,dm_cpq_Accounts_Opps__c>();//oppList);
+     for(dm_cpq_Quote__c dmQuote : dmQuotes)
+     {
+         if(oppProdMap.containsKey(dmQuote.Opportunity_Opportunity_Name__c))
+         {
+             dmQuote.dm_StartDate__c = oppProdMap.get(dmQuote.Opportunity_Opportunity_Name__c).START_DATE_C__c;
+             dmQuote.dm_EndDate__c = oppProdMap.get(dmQuote.Opportunity_Opportunity_Name__c).END_DATE_C__c;
+             forUpdateQuote.add(dmQuote);
+             
+         }
+     }
+	System.debug('Count:'+forUpdateQuote.size());
+	Database.update(forUpdateQuote);
+ }
+  //Based on Acc Opps update CPQ Quote - Acc
+ public static void updateAccLookupInDMQuote(List<dm_cpq_Accounts_Opps__c> accoppList)
+ {
+    //Get the Opp with Account
+     Map<String,dm_cpq_Accounts_Opps__c> accMap = new Map<String,dm_cpq_Accounts_Opps__c>();//oppList);
+	 Set<String> oppNames = new Set<String>();
+     List<dm_cpq_Quote__c> forUpdateQuote = new List<dm_cpq_Quote__c>();
+     for(dm_cpq_Accounts_Opps__c acc : accoppList)
+     {
+         accMap.put(acc.Opportunity_Name__c,acc);
+     }
+    List<dm_cpq_Quote__c> dmQuotes = [Select Id,Opportunity_Opportunity_18_Digit_Id__c,Account__c,Opportunity_Opportunity_Name__c  from dm_cpq_Quote__c 
+                                          where Opportunity_Opportunity_Name__c != null and Opportunity_Opportunity_18_Digit_Id__c != null and Account__c = null
+                                     and Opportunity_Opportunity_Name__c in :accMap.keySet()];
+	
+     Map<String,dm_cpq_Accounts_Opps__c> oppMap = new Map<String,dm_cpq_Accounts_Opps__c>();//oppList);
+     for(dm_cpq_Quote__c dmQuote : dmQuotes)
+     {
+         if(accMap.containsKey(dmQuote.Opportunity_Opportunity_Name__c))
+         {
+             dmQuote.Account__c = accMap.get(dmQuote.Opportunity_Opportunity_Name__c).Account__c;
+             forUpdateQuote.add(dmQuote);
+             
+         }
+     }
+	System.debug('Count:'+forUpdateQuote.size());
+	Database.update(forUpdateQuote);
+ }
+  //QUOTE - Full load
+  //Update Zuora Quote' Opp lookup with 18 digit id
+   //Based on Acc Opps update CPQ Quote - Acc
+ public static void updateOppIdLookupInDMQuote(List<dm_cpq_Quote__c> quotes)
+ {
+    //Get the Opp with Account
+     Map<String,dm_cpq_Quote__c> quoteMap = new Map<String,dm_cpq_Quote__c>();//oppList);
+	 Set<String> oppNames = new Set<String>();
+     List<dm_cpq_Quote__c> forUpdateQuote = new List<dm_cpq_Quote__c>();
+     for(dm_cpq_Quote__c q : quotes)
+     {
+        // oppNames.add(q.Opportunity_Opportunity_Name__c);
+        // q.Opportunity__c = q.Opportunity_Opportunity_18_Digit_Id__c;
+        // forUpdateQuote.add(q);
+         quoteMap.put(q.Opportunity_Opportunity_Name__c,q);
+     }
+     List<dm_OpportunityProducts__c> oppProds = [Select Id,OPPORTUNITYID__c ,ACCOUNT_ID_C__c,
+                                                OPPORTUNITY_NAME_C__c,START_DATE_C__c,END_DATE_C__c,PAYMENT_TERMS_C__c
+                                                 from dm_OpportunityProducts__c 
+                                          where OPPORTUNITY_NAME_C__c != null and OPPORTUNITYID__c != null and ACCOUNT_ID_C__c != null
+                                     and OPPORTUNITY_NAME_C__c in :quoteMap.keySet()];
+	
+     Map<String,dm_OpportunityProducts__c> oppMap = new Map<String,dm_OpportunityProducts__c>();//oppList);
+     for(dm_OpportunityProducts__c oppProd : oppProds)
+     {
+         if(quoteMap.containsKey(oppProd.OPPORTUNITY_NAME_C__c))
+         {
+             dm_cpq_Quote__c quoteTemp = quoteMap.get(oppProd.OPPORTUNITY_NAME_C__c);
+             quoteTemp.Opportunity__c = oppProd.OPPORTUNITYID__c;
+             quoteTemp.Account__c = oppProd.ACCOUNT_ID_C__c;
+             quoteTemp.dm_StartDate__c = oppProd.START_DATE_C__c;
+             quoteTemp.dm_EndDate__c = oppProd.END_DATE_C__c;
+             quoteTemp.Payment_Term__c = oppProd.PAYMENT_TERMS_C__c;
+             //quoteTemp.Contract__c = oppProd.co;
+             if(! forUpdateQuote.contains(quoteTemp))
+              forUpdateQuote.add(quoteTemp);
+         }
+     }
+     
+	System.debug('Count:'+forUpdateQuote.size());
+	Database.update(forUpdateQuote);
+ }
+  //End
+ //Based on Contracts and orders update CPQ Quote - Contract
+ public static void updateContractLookupInCpqQuotes(List<dm_cpq_Contracts_Orders__c> contractOrdersList)
+ {
+     Map<String,dm_cpq_Contracts_Orders__c> contOrderMap = new Map<String,dm_cpq_Contracts_Orders__c>();
+     Set<String> oppNames = new Set<String>();
+     List<dm_cpq_Quote__c> forUpdateQuote = new List<dm_cpq_Quote__c>();
+     for(dm_cpq_Contracts_Orders__c contOrder : contractOrdersList)
+     {
+         contOrderMap.put(contOrder.Order_Name__c,contOrder);
+     }
+     List<dm_cpq_Quote__c> dmQuotes = [Select Id,Opportunity_Opportunity_18_Digit_Id__c,Contract__c,Account__c,Opportunity_Opportunity_Name__c  from dm_cpq_Quote__c 
+                                          where Opportunity_Opportunity_Name__c != null and 
+                                      Opportunity_Opportunity_18_Digit_Id__c != null 
+                                     and Opportunity_Opportunity_Name__c in :contOrderMap.keySet()];
+	System.debug('dmQuotes:'+dmQuotes.size());
+     for(dm_cpq_Quote__c dmQuote : dmQuotes)
+     {
+         if(contOrderMap.containsKey(dmQuote.Opportunity_Opportunity_Name__c))
+         {
+            dmQuote.Contract__c = contOrderMap.get(dmQuote.Opportunity_Opportunity_Name__c).Contract__c;
+            forUpdateQuote.add(dmQuote);
+             
+         }
+     }
+	System.debug('Count:'+forUpdateQuote.size());
+	Database.update(forUpdateQuote);
+ }
+    //Based on dm Zura Customer update the dm CPQ Quote Customer Email with Account id
+ public static void updateCustomerEmailInCpqQuotesViaZuoraAcc(List<dm_cpq_Quote__c> dmQuotes)
+ {
+     Map<Id,dm_cpq_Quote__c> accMap = new Map<Id,dm_cpq_Quote__c>();
+     Set<String> truncatedIds = new Set<String>();
+     List<dm_cpq_Quote__c> forUpdateQuote = new List<dm_cpq_Quote__c>();
+     for(dm_cpq_Quote__c acc : dmQuotes)
+     {
+         //truncatedIds.add(acc.Account_CRM_Account_ID__c);//.to15());
+         //accMap.put(acc.Account_CRM_Account_ID__c.substring(0,15) ,acc.Bill_To_Work_Email__c);
+         
+         accMap.put(acc.Account__c.to15(),acc);
+     }
+     List<dm_Zuora_Customer__c> customers = [Select Id,Bill_To_Work_Email__c,Account_CRM_Account_ID__c from dm_Zuora_Customer__c
+                                             where Account_CRM_Account_ID__c != null  and Account_CRM_Account_ID__c in :accMap.keySet()];
+	System.debug('dmQuotes:'+dmQuotes.size());
+     for(dm_Zuora_Customer__c cust : customers)
+     {
+         if(accMap.containsKey(cust.Account_CRM_Account_ID__c))
+         {
+            dm_cpq_Quote__c q = accMap.get(cust.Account_CRM_Account_ID__c);
+            q.dm_BillToCustomerEmail__c = cust.Bill_To_Work_Email__c;
+            forUpdateQuote.add(q);
+             
+         }
+     }
+	System.debug('Count:'+forUpdateQuote.size());
+	Database.update(forUpdateQuote);
+ }
+ //Based on dm Zura Customer update the dm CPQ Quote Customer Email with Account id
+ public static void updateCustomerEmailInCpqQuotes(List<dm_Zuora_Customer__c> customers)
+ {
+     Map<Id,String> accMap = new Map<Id,String>();
+     Set<String> truncatedIds = new Set<String>();
+     List<dm_cpq_Quote__c> forUpdateQuote = new List<dm_cpq_Quote__c>();
+     for(dm_Zuora_Customer__c acc : customers)
+     {
+         //truncatedIds.add(acc.Account_CRM_Account_ID__c);//.to15());
+         //accMap.put(acc.Account_CRM_Account_ID__c.substring(0,15) ,acc.Bill_To_Work_Email__c);
+         accMap.put(acc.Account_CRM_Account_ID__c ,acc.Bill_To_Work_Email__c);
+     }
+     List<dm_cpq_Quote__c> dmQuotes = [Select Id,dm_BillToCustomerEmail__c,Opportunity_Opportunity_18_Digit_Id__c,Contract__c,Account__c,
+                                       Opportunity_Opportunity_Name__c  from dm_cpq_Quote__c 
+                                          where Account__c != null and Account__c in :accMap.keySet()];
+	System.debug('dmQuotes:'+dmQuotes.size());
+     for(dm_cpq_Quote__c dmQuote : dmQuotes)
+     {
+         if(accMap.containsKey(dmQuote.Account__c))
+         {
+            dmQuote.dm_BillToCustomerEmail__c = accMap.get(dmQuote.Account__c);
+            forUpdateQuote.add(dmQuote);
+             
+         }
+     }
+	System.debug('Count:'+forUpdateQuote.size());
+	Database.update(forUpdateQuote);
+ }
+ 
+/*******End**************/
+ public static void updateAccountLookupZuroSub(List<Account> accList)
+ {
+     Map<Id,Account> accMap = new Map<Id,Account>(accList);
+     Set<String> truncatedIds = new Set<String>();
+     for(Account acc : accList)
+     {
+         truncatedIds.add(acc.Id.to15());
+     }
+     
+	 List<dm_Zuora_Subscription__c > dmAcc = [Select Id,Account_CRM_Account_ID__c,Account__c from dm_Zuora_Subscription__c 
+                                                where Account__c = null 
+                                               and Account_CRM_Account_ID__c in :truncatedIds];
+	 List<dm_Zuora_Subscription__c> forUpdate = new List<dm_Zuora_Subscription__c >();
+	for(dm_Zuora_Subscription__c  obj : dmAcc)
+	{
+    if(accMap.containsKey(obj.Account_CRM_Account_ID__c))
+    { obj.Account__c = obj.Account_CRM_Account_ID__c;
+     forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+ public static void updateOppLookupZuroSub(List<dm_cpq_Accounts_Opps__c> accoppList)
+ {
+     //Get only new 
+     /*
+      * List<dm_cpq_Accounts_Opps__c> accs = [Select Id,Opportunity_18_Digit_Id__c,Opportunity_Name__c from dm_cpq_Accounts_Opps__c where Opportunity_18_Digit_Id__c != null and Opportunity_Name__c != null and Opportunity__c = null];
+	Map<String,dm_cpq_Accounts_Opps__c> oppMap = new Map<String,dm_cpq_Accounts_Opps__c>();//oppList);
+	Set<String> oppNames = new Set<String>();
+     for(dm_cpq_Accounts_Opps__c opp : accs)
+     {
+         oppMap.put(opp.Opportunity_Name__c,opp);
+     }
+List<dm_Zuora_Subscription__c> subs = [Select Id,Account_CRM_Account_ID__c,Account__c,Opportunity__c,Subscription_Opportunity_Name__c
+                                              from dm_Zuora_Subscription__c 
+                                                where Subscription_Opportunity_Name__c != null and Subscription_Opportunity_Name__c in :oppMap.keySet()];
+System.debug('Subs:'+subs.size());
+     */
+     Map<String,dm_cpq_Accounts_Opps__c> oppMap = new Map<String,dm_cpq_Accounts_Opps__c>();//oppList);
+     Set<String> oppNames = new Set<String>();
+     for(dm_cpq_Accounts_Opps__c opp : accoppList)
+     {
+         oppMap.put(opp.Opportunity_Name__c,opp);
+     }
+     
+	 List<dm_Zuora_Subscription__c > dmAcc = [Select Id,Account_CRM_Account_ID__c,Account__c,Opportunity__c,Subscription_Opportunity_Name__c
+                                              from dm_Zuora_Subscription__c 
+                                                where Opportunity__c = null 
+                                               and Subscription_Opportunity_Name__c in :oppMap.keySet()];
+	 List<dm_Zuora_Subscription__c> forUpdate = new List<dm_Zuora_Subscription__c >();
+	for(dm_Zuora_Subscription__c  obj : dmAcc)
+	{
+    if(oppMap.containsKey(obj.Subscription_Opportunity_Name__c))
+    { 
+        obj.Opportunity__c = (oppMap.get(obj.Subscription_Opportunity_Name__c)).Opportunity__c;
+     	forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+ public static void updateContractLookupZuroSub(List<dm_cpq_Contracts_Orders__c> contractOrdersList)
+ {
+     Map<String,dm_cpq_Contracts_Orders__c> oppMap = new Map<String,dm_cpq_Contracts_Orders__c>();//oppList);
+     Set<String> oppNames = new Set<String>();
+     for(dm_cpq_Contracts_Orders__c opp : contractOrdersList)
+     {
+         oppMap.put(opp.Order_Name__c,opp);
+     }
+     
+	 List<dm_Zuora_Subscription__c > dmAcc = [Select Id,Account_CRM_Account_ID__c,Contract__c,Subscription_Opportunity_Name__c,Opportunity__c
+                                              from dm_Zuora_Subscription__c 
+                                                where Contract__c = null 
+                                               and Subscription_Opportunity_Name__c in :oppMap.keySet()];
+	 List<dm_Zuora_Subscription__c> forUpdate = new List<dm_Zuora_Subscription__c >();
+	for(dm_Zuora_Subscription__c  obj : dmAcc)
+	{
+    if(oppMap.containsKey(obj.Subscription_Opportunity_Name__c))
+    { obj.Contract__c = oppMap.get(obj.Subscription_Opportunity_Name__c).Contract__c;
+     forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+    //With curly braces
+ public static void updateProductLookupCPQProdForOppProd(List<dm_OpportunityProducts__c > prodList,Map<String,dm_OpportunityProducts__c> nonMatchedCPQProductNameTodmProdMap)
+ {
+     Map<String,List<dm_OpportunityProducts__c>> productNameTodmProdMap = new Map<String,List<dm_OpportunityProducts__c>>();
+     Map<String,dm_OpportunityProducts__c> dmprodMap = new Map<String,dm_OpportunityProducts__c>(prodList);
+     List<Product2> orgProducts = [Select Id,Name,PC_1__c from Product2 where Name like '%CPQ'];
+     Set<String> oppNames = new Set<String>();
+     Set<String> productsName = new Set<String>();
+     Map<String,Product2> orgProductsMap = new Map<String,Product2>();//(orgProducts);
+     //Get the Product Code with Name in a set
+     for(Product2 p : orgProducts)  
+     {
+         productsName.add(p.Name);
+         System.debug('Product Name:'+p.Name);
+         orgProductsMap.put(p.Name,p);
+     }
+     
+	 List<dm_OpportunityProducts__c> forUpdate = new List<dm_OpportunityProducts__c >();
+	for(dm_OpportunityProducts__c  prod : prodList)
+	{
+         System.debug('Name:-CPQ:'+prod.PRODUCT_NAME_C__c+'-CPQ');
+         System.debug('Name:-CPQ'+productsName.contains(prod.PRODUCT_NAME_C__c+'-CPQ'));
+         System.debug('Name: -CPQ'+productsName.contains(prod.PRODUCT_NAME_C__c+ ' -CPQ'));
+         System.debug('Name: - CPQ'+productsName.contains(prod.PRODUCT_NAME_C__c+' - CPQ'));
+         System.debug('Name: CPQ'+productsName.contains(prod.PRODUCT_NAME_C__c+' CPQ'));
+        //Check for the Product name in CPQ
+         //This logic is for the different names in Opp Prod excel and Block Price Product in org
+        String  prodNameWithoutCurlyBraces = prod.PRODUCT_NAME_C__c.contains('(') ? prod.PRODUCT_NAME_C__c.substringBeforeLast('(').trim() : prod.PRODUCT_NAME_C__c;
+        //System.debug('name:'+name);
+        System.debug('prodNameWithoutCurlyBraces:'+prodNameWithoutCurlyBraces);
+        if(productsName.contains(prodNameWithoutCurlyBraces+'-CPQ') || productsName.contains(prodNameWithoutCurlyBraces+ ' -CPQ')
+            || productsName.contains(prodNameWithoutCurlyBraces+' - CPQ') || productsName.contains(prodNameWithoutCurlyBraces+' CPQ'))
+            {
+                String prodNameWithCPQ = '';
+                if(productsName.contains(prodNameWithoutCurlyBraces+'-CPQ'))
+                    prodNameWithCPQ = prodNameWithoutCurlyBraces+'-CPQ';
+                 else if(productsName.contains(prodNameWithoutCurlyBraces+ ' -CPQ'))
+                     prodNameWithCPQ = prodNameWithoutCurlyBraces+ ' -CPQ';
+                 else if(productsName.contains(prodNameWithoutCurlyBraces+' - CPQ'))
+                     prodNameWithCPQ = prodNameWithoutCurlyBraces+' - CPQ';
+                 else if (productsName.contains(prodNameWithoutCurlyBraces+' CPQ'))
+                     prodNameWithCPQ = prodNameWithoutCurlyBraces+' CPQ';
+                System.debug('prodNameWithCPQ:IN:'+prodNameWithCPQ);
+          if(productNameTodmProdMap.containsKey(prodNameWithCPQ))
+           productNameTodmProdMap.get(prodNameWithCPQ).add(prod);
+          else productNameTodmProdMap.put(prodNameWithCPQ,new List<dm_OpportunityProducts__c>{prod});
+           }
+      /*  if(productsName.contains(prod.PRODUCT_NAME_C__c+'-CPQ') || productsName.contains(prod.PRODUCT_NAME_C__c+ ' -CPQ')
+            || productsName.contains(prod.PRODUCT_NAME_C__c+' - CPQ') || productsName.contains(prod.PRODUCT_NAME_C__c+' CPQ'))
+            {
+                String prodNameWithCPQ = '';
+                if(productsName.contains(prod.PRODUCT_NAME_C__c+'-CPQ'))
+                    prodNameWithCPQ = prod.PRODUCT_NAME_C__c+'-CPQ';
+                 else if(productsName.contains(prod.PRODUCT_NAME_C__c+ ' -CPQ'))
+                     prodNameWithCPQ = prod.PRODUCT_NAME_C__c+ ' -CPQ';
+                 else if(productsName.contains(prod.PRODUCT_NAME_C__c+' - CPQ'))
+                     prodNameWithCPQ = prod.PRODUCT_NAME_C__c+' - CPQ';
+                 else if (productsName.contains(prod.PRODUCT_NAME_C__c+' CPQ'))
+                     prodNameWithCPQ = prod.PRODUCT_NAME_C__c+' CPQ';
+                
+          if(productNameTodmProdMap.containsKey(prodNameWithCPQ))
+           productNameTodmProdMap.get(prodNameWithCPQ).add(prod);
+          else productNameTodmProdMap.put(prodNameWithCPQ,new List<dm_OpportunityProducts__c>{prod});
+           }*/
+    }
+	for(String dmProdName :productNameTodmProdMap.keySet())
+    {
+        if(orgProductsMap.containsKey(dmProdName))
+        {
+            List<dm_OpportunityProducts__c> dmProdsTemp = productNameTodmProdMap.get(dmProdName);
+            for(dm_OpportunityProducts__c p : dmProdsTemp)
+            {
+                if(p.dm_ProductId_New__c == null && p.dm_Product_Name_New__c == null ){
+                p.dm_ProductId_New__c = (orgProductsMap.get(dmProdName)).Id;
+                p.dm_Product_Name_New__c = dmProdName;//Name with CPQ
+                forUpdate.add(p);
+                }
+            }
+        }
+    }
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+  public static void updateProductLookupCPQProdForZuroSub(List<dm_cpq_Product__c > prodList)
+ {
+     Map<String,List<dm_cpq_Product__c>> productNameTodmProdMap = new Map<String,List<dm_cpq_Product__c>>();
+     Map<String,dm_cpq_Product__c> dmprodMap = new Map<String,dm_cpq_Product__c>(prodList);
+     List<Product2> orgProducts = [Select Id,Name from Product2 where Name like '%CPQ'];
+     Set<String> oppNames = new Set<String>();
+      Set<String> productsName = new Set<String>();
+     Map<String,Product2> orgProductsMap = new Map<String,Product2>();//(orgProducts);
+     //Get the Product Code with Name in a set
+     for(Product2 p : orgProducts)  
+     {
+         productsName.add(p.Name);
+         System.debug('Product Name:'+p.Name);
+         orgProductsMap.put(p.Name,p);
+     }
+     
+	 List<dm_cpq_Product__c> forUpdate = new List<dm_cpq_Product__c >();
+	for(dm_cpq_Product__c  prod : prodList)
+	{
+         System.debug('Name:-CPQ:'+prod.Product_Name__c+'-CPQ');
+         System.debug('Name:-CPQ'+productsName.contains(prod.Product_Name__c+'-CPQ'));
+         System.debug('Name: -CPQ'+productsName.contains(prod.Product_Name__c+ ' -CPQ'));
+         System.debug('Name: - CPQ'+productsName.contains(prod.Product_Name__c+' - CPQ'));
+         System.debug('Name: CPQ'+productsName.contains(prod.Product_Name__c+' CPQ'));
+          
+         //Check for the Product name in CPQ
+         if(productsName.contains(prod.Product_Name__c+'-CPQ') || productsName.contains(prod.Product_Name__c+ ' -CPQ')
+            || productsName.contains(prod.Product_Name__c+' - CPQ') || productsName.contains(prod.Product_Name__c+' CPQ'))
+            {
+                String prodNameWithCPQ = '';
+                if(productsName.contains(prod.Product_Name__c+'-CPQ'))
+                    prodNameWithCPQ = prod.Product_Name__c+'-CPQ';
+                 else if(productsName.contains(prod.Product_Name__c+ ' -CPQ'))
+                     prodNameWithCPQ = prod.Product_Name__c+ ' -CPQ';
+                 else if(productsName.contains(prod.Product_Name__c+' - CPQ'))
+                     prodNameWithCPQ = prod.Product_Name__c+' - CPQ';
+                 else if (productsName.contains(prod.Product_Name__c+' CPQ'))
+                     prodNameWithCPQ = prod.Product_Name__c+' CPQ';
+          if(productNameTodmProdMap.containsKey(prodNameWithCPQ))
+           productNameTodmProdMap.get(prodNameWithCPQ).add(prod);
+          else productNameTodmProdMap.put(prodNameWithCPQ,new List<dm_cpq_Product__c>{prod});
+           }
+           }
+               
+	for(String dmProdName :productNameTodmProdMap.keySet())
+    {
+        if(orgProductsMap.containsKey(dmProdName))
+        {
+            List<dm_cpq_Product__c> dmProdsTemp = productNameTodmProdMap.get(dmProdName);
+            for(dm_cpq_Product__c p : dmProdsTemp)
+            {
+                p.Product__c = (orgProductsMap.get(dmProdName)).Id;
+                p.dm_Product_Name_New__c = dmProdName;//Name with CPQ
+                forUpdate.add(p);
+            }
+        }
+    }
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+ public static void updateContractLookupZuroSub(List<Contract> contractList)
+ {
+     Map<Id,Contract> contMap = new Map<Id,Contract>(contractList);
+     Set<String> truncatedIds = new Set<String>();
+     for(Contract opp : contractList)
+     {
+         truncatedIds.add(opp.Id.to15());
+     }
+	 List<dm_cpq_Contracts_Orders__c > dmAcc = [Select Id,Contract_Id__c,Contract__c from dm_cpq_Contracts_Orders__c where Contract__c = null 
+                                            //and Account_ID__c in :accMap.keySet()];
+                                            and Contract_Id__c in :truncatedIds];
+	 List<dm_cpq_Contracts_Orders__c > forUpdate = new List<dm_cpq_Contracts_Orders__c>();
+	for(dm_cpq_Contracts_Orders__c  obj : dmAcc)
+	{
+    if(contMap.containsKey(obj.Contract_Id__c))
+    { obj.Contract__c = obj.Contract_Id__c;
+     forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+ public static void updateOrderLookup(List<Order> orderList)
+ {
+     Map<Id,Order> orderMap = new Map<Id,Order>(orderList);
+     Set<String> truncatedIds = new Set<String>();
+     for(Order opp : orderList)
+     {
+         truncatedIds.add(opp.Id.to15());
+     }
+	 List<dm_cpq_Contracts_Orders__c > dmAcc = [Select Id,Order_Id__c,Order__c from dm_cpq_Contracts_Orders__c where Order__c = null 
+                                            //and Account_ID__c in :accMap.keySet()];
+                                            //and Contract_Id__c in :truncatedIds];
+                                             and Order_Id__c in :truncatedIds];
+	 List<dm_cpq_Contracts_Orders__c > forUpdate = new List<dm_cpq_Contracts_Orders__c>();
+	for(dm_cpq_Contracts_Orders__c  obj : dmAcc)
+	{
+    if(orderMap.containsKey(obj.Order_Id__c))
+    { obj.Order__c = obj.Order_Id__c;
+     forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+ public static void updateContractLookup(List<Contract> contractList)
+ {
+     Map<Id,Contract> contMap = new Map<Id,Contract>(contractList);
+     Set<String> truncatedIds = new Set<String>();
+     for(Contract opp : contractList)
+     {
+         truncatedIds.add(opp.Id.to15());
+     }
+	 List<dm_cpq_Contracts_Orders__c > dmAcc = [Select Id,Contract_Id__c,Contract__c from dm_cpq_Contracts_Orders__c where Contract__c = null 
+                                            //and Account_ID__c in :accMap.keySet()];
+                                            and Contract_Id__c in :truncatedIds];
+	 List<dm_cpq_Contracts_Orders__c > forUpdate = new List<dm_cpq_Contracts_Orders__c>();
+	for(dm_cpq_Contracts_Orders__c  obj : dmAcc)
+	{
+    if(contMap.containsKey(obj.Contract_Id__c))
+    { obj.Contract__c = obj.Contract_Id__c;
+     forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+ public static void updateOppLookup(List<Opportunity> oppList)
+ {
+     Map<Id,Opportunity> oppMap = new Map<Id,Opportunity>(oppList);
+    // Set<String> truncatedIds = new Set<String>();
+     /*for(Opportunity opp : accList)
+     {
+         truncatedIds.add(opp.Id.to15());
+     }*/
+	 /*List<dm_cpq_Accounts_Opps__c> dmAcc = [Select Id,Opportunity_18_Digit_Id__c from dm_cpq_Accounts_Opps__c where Opportunity__c = null 
+                                           //and Account_ID__c in :accMap.keySet()];
+                                           and Opportunity_18_Digit_Id__c in :oppMap.keySet()];*/
+     List<dm_cpq_Quote__c> dmAcc = [Select Id,Opportunity_Opportunity_18_Digit_Id__c,Opportunity_Opportunity_Name__c  from dm_cpq_Quote__c where Opportunity__c = null 
+                                           //and Account_ID__c in :accMap.keySet()];
+                                           and Opportunity_Opportunity_18_Digit_Id__c  in :oppMap.keySet()];
+	 List<dm_cpq_Quote__c> forUpdate = new List<dm_cpq_Quote__c>();
+	for(dm_cpq_Quote__c obj : dmAcc)
+	{
+    if(oppMap.containsKey(obj.Opportunity_Opportunity_18_Digit_Id__c ))
+    { //Remove + and - sign for validation
+       /* String oppTemp = (oppMap.get(obj.Opportunity_Opportunity_18_Digit_Id__c ).Name).replace('+',' ').replace('-',' ').replace('ä',' ').replace('"',' ').replace('?',' ').replace(':',' ');
+        String dmTemp = (obj.Opportunity_Opportunity_Name__c).replace('+',' ').replace('-',' ').replace('ä',' ').replace('"',' ').replace('?',' ').replace(':',' ');
+        if(oppTemp.equals(dmTemp)){*/
+        obj.Opportunity__c = obj.Opportunity_Opportunity_18_Digit_Id__c ;
+        forUpdate.add(obj);//}
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+ public static void updateZQuoteLookup(List<zqu__Quote__c> zQuoteList)
+ {
+     Map<String,zqu__Quote__c> oppMap = new Map<String,zqu__Quote__c>();
+     for(zqu__Quote__c q :zQuoteList)
+     {
+         oppMap.put(q.zqu__Number__c,q);
+     }
+    // Set<String> truncatedIds = new Set<String>();
+     /*for(Opportunity opp : accList)
+     {
+         truncatedIds.add(opp.Id.to15());
+     }*/
+	 /*List<dm_cpq_Accounts_Opps__c> dmAcc = [Select Id,Opportunity_18_Digit_Id__c from dm_cpq_Accounts_Opps__c where Opportunity__c = null 
+                                           //and Account_ID__c in :accMap.keySet()];
+                                           and Opportunity_18_Digit_Id__c in :oppMap.keySet()];*/
+     List<dm_cpq_Quote__c> dmAcc = [Select Id,Quote_Quote_Name__c,Number__c,Quote2__c,Opportunity_Opportunity_18_Digit_Id__c from dm_cpq_Quote__c where
+                                    Number__c  in :oppMap.keySet() and 
+                                     Quote2__c = null ];
+                                          
+	 List<dm_cpq_Quote__c> forUpdate = new List<dm_cpq_Quote__c>();
+	for(dm_cpq_Quote__c obj : dmAcc)
+	{
+    if(oppMap.containsKey(obj.Number__c ))
+    { //Remove + and - sign for validation
+       /* String oppTemp = (oppMap.get(obj.Opportunity_Opportunity_18_Digit_Id__c ).Name).replace('+',' ').replace('-',' ').replace('ä',' ').replace('"',' ').replace('?',' ').replace(':',' ');
+        String dmTemp = (obj.Opportunity_Opportunity_Name__c).replace('+',' ').replace('-',' ').replace('ä',' ').replace('"',' ').replace('?',' ').replace(':',' ');
+        *///if(oppMap.get(obj.Number__c ).Name == obj.Quote_Quote_Name__c){
+        if(oppMap.get(obj.Number__c ).zqu__Opportunity__c == obj.Opportunity_Opportunity_18_Digit_Id__c){
+        obj.Quote2__c =oppMap.get(obj.Number__c ).Id;
+        forUpdate.add(obj);}
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+ public static void updateAccountLookup(List<Account> accList)
+ {
+     Map<Id,Account> accMap = new Map<Id,Account>(accList);
+    Set<String> truncatedIds = new Set<String>();
+     for(Account acc : accList)
+     {
+         truncatedIds.add(acc.Id.to15());
+     }
+	 List<dm_cpq_Contracts_Orders__c > dmAcc = [Select Id,Account_ID__c,Account__c from dm_cpq_Contracts_Orders__c  where Account__c = null 
+                                           //and Account_ID__c in :accMap.keySet()];
+                                           and Account_ID__c in :truncatedIds];
+	 List<dm_cpq_Contracts_Orders__c> forUpdate = new List<dm_cpq_Contracts_Orders__c >();
+	for(dm_cpq_Contracts_Orders__c  obj : dmAcc)
+	{
+    if(accMap.containsKey(obj.Account_ID__c))
+    { obj.Account__c = obj.Account_ID__c;
+     forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+ public static void updateAccountLookupInZuro(List<Account> accList)
+ {
+     Map<Id,Account> accMap = new Map<Id,Account>();//(accList);
+     /*Set<String> truncatedIds = new Set<String>();
+     for(Account acc : accList)
+     {
+         truncatedIds.add(acc.Id.to15());
+     }*/
+	 /*List<dm_Zuora_Invoice__c > dmAcc = [Select Id,Account_CRM_Account_ID__c,Account__c from dm_Zuora_Invoice__c 
+                                                where Account__c = null 
+                                              // and Account_CRM_Account_ID__c in :accMap.keySet()];
+     											and Account_CRM_Account_ID__c in :truncatedIds];
+	 List<dm_Zuora_Invoice__c> forUpdate = new List<dm_Zuora_Invoice__c >();
+	for(dm_Zuora_Invoice__c  obj : dmAcc)
+	{
+    if(accMap.containsKey(obj.Account_CRM_Account_ID__c))
+    { obj.Account__c = obj.Account_CRM_Account_ID__c;
+     forUpdate.add(obj);
+    }
+	}*/
+    Set<String> truncatedIds = new Set<String>();
+     for(Account acc : accList)
+     {
+         truncatedIds.add(acc.Id.to15());
+         accMap.put(acc.Id.to15(),acc);
+     }
+    /*List<dm_cpq_Contracts_Opportunities__c  > dmAcc = [Select Id,Account_Name_Account_ID__c,Account__c from dm_cpq_Contracts_Opportunities__c  
+                                                where Account__c = null 
+                                                //and Account_Name_Account_ID__c in :accMap.keySet()];
+     											and Account_Name_Account_ID__c in :truncatedIds];
+	List<dm_cpq_Contracts_Opportunities__c > forUpdate = new List<dm_cpq_Contracts_Opportunities__c>();
+	for(dm_cpq_Contracts_Opportunities__c   obj : dmAcc)
+	{
+    if(accMap.containsKey(obj.Account_Name_Account_ID__c))
+    { obj.Account__c = obj.Account_Name_Account_ID__c;
+     forUpdate.add(obj);
+    }
+	}*/
+     List<dm_Zuora_Customer__c> dmAcc = [Select Id,Account_CRM_Account_ID__c ,Account__c from dm_Zuora_Customer__c   
+                                                where Account_CRM_Account_ID__c  = null 
+                                                //and Account_Name_Account_ID__c in :accMap.keySet()];
+     											and Account_CRM_Account_ID__c in :truncatedIds];
+	List<dm_Zuora_Customer__c> forUpdate = new List<dm_Zuora_Customer__c >();
+	for(dm_Zuora_Customer__c    obj : dmAcc)
+	{
+    if(accMap.containsKey(obj.Account_CRM_Account_ID__c ))
+    { obj.Account__c = accMap.get(obj.Account_CRM_Account_ID__c).Id ;
+     forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+public void finish(Database.BatchableContext BC)
+ {
+     System.debug('Finish For Insert Quote:'+forInsertQuote.size());
+	 System.debug('Finish For Insert Quote Line:'+forInsertQuoteLine.size()); 
+     //System.debug('Finish For Update Quote Line:'+ forUpdateQuoteLine.size());
+      if(forInsertQuote.size()>0)
+       Database.Insert(forInsertQuote); 
+     if(forInsertQuoteLine.size()>0)
+         sendEmailWithAttachment(forInsertQuoteLine);
+     /*if(forUpdateQuoteLine.size()>0)
+        Database.update(forUpdateQuoteLine); */
+     //Get the non cpq or non related products
+     //Map<String,dm_OpportunityProducts__c> nonMatchedCPQProductNameTodmProdMap
+     System.debug('Finish Non CPQ Prods or Missed:'+nonMatchedCPQProductNameTodmProdMap.size());
+     if(nonMatchedCPQProductNameTodmProdMap.size()>0)
+         sendProductsEmailWithAttachment(nonMatchedCPQProductNameTodmProdMap);
+     //Error
+     if(quoteToProdAmount.size()>0)
+     sendEmailWithAttachment(quoteToProdAmount);
+ }
+}

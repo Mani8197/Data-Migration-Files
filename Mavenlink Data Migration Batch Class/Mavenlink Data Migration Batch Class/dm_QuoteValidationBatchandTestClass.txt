@@ -1,0 +1,368 @@
+//Validate Quote alll- error and non error
+//Validate for Manualfix
+public class dm_QuoteValidationBatch implements Database.Batchable<sObject>,Database.Stateful {
+    //Validation
+//Compare the Total
+public Map<SBQQ__Quote__c,Decimal> quoteToProdAmount = new Map<SBQQ__Quote__c,Decimal>();
+public database.querylocator start(Database.BatchableContext BC)
+{
+    String queryCPQQuote = 'Select Id,Name,SBQQ__Source__c,SBQQ__BillingFrequency__c,SBQQ__Opportunity2__c,SBQQ__Opportunity2__r.Name,SBQQ__Opportunity2__r.StageName,SBQQ__Account__c,'
+        +'SBQQ__NetAmount__c ,SBQQ__SubscriptionTerm__c,SBQQ__StartDate__c,SBQQ__EndDate__c  from SBQQ__Quote__c where '
+        +' Dm_Check__c = true ';//No Manual fix
+       // + ' AND  DM_ErrorQuote__c = true and Manual_Fix__c  = false and SBQQ__Primary__c = true';//Manual Fix//';//and DM_ErrorQuote__c = false';//AND  Manual_Fix__c  = true';
+       ///DM_ErrorQuote__c = true and Manual_Fix__c  = true and SBQQ__Source__c != null
+    String queryCPQClonedQuote = 'Select Id,Name,SBQQ__Source__c,SBQQ__BillingFrequency__c,SBQQ__Opportunity2__c,SBQQ__Opportunity2__r.Name,SBQQ__Opportunity2__r.StageName,SBQQ__Account__c,'
+        +'SBQQ__NetAmount__c ,SBQQ__SubscriptionTerm__c,SBQQ__StartDate__c,SBQQ__EndDate__c  from SBQQ__Quote__c where '
+        +' DM_Check__c = true '//No Manual fix
+       // + ' AND  DM_ErrorQuote__c = true and Manual_Fix__c  = false and SBQQ__Primary__c = true';//Manual Fix//';//and DM_ErrorQuote__c = false';//AND  Manual_Fix__c  = true';
+        + 'and SBQQ__Source__c != null';
+    return Database.getQueryLocator(queryCPQQuote);//queryCPQClonedQuote //queryCPQQuote
+}
+    public void execute(Database.BatchableContext BC,List<SBQQ__Quote__c> quotes)
+    {
+        //-----------------Final Validation Quote and QL validation - Amount
+        verifyMigratedQuoteAmount(quotes,quoteToProdAmount);
+        //Final With Cloned Quotes
+        //verifyMigratedQuoteAmountClonedQuotes(quotes,quoteToProdAmount);//Use queryCPQClonedQuote query
+    }
+    public static void verifyMigratedQuoteAmount(List<SBQQ__Quote__c> quotes,Map<SBQQ__Quote__c,Decimal> quoteToProdAmount )
+  {
+      //Get the Quote amount
+      //Get the Opp Prod Base - dm Prod = true Quote Amount
+      //And Map it.
+      Map<Id,SBQQ__Quote__c> quoteMap = new Map<Id,SBQQ__Quote__c>(quotes);
+      //Prod Total
+      Map<Id,Decimal> prdOppProdTotal = new Map<Id,Decimal>();
+      //Data Migration Quotes
+      Map<Id,Decimal> dmQuoteTotal = new Map<Id,Decimal>();
+      Map<Id,Id> quoteOldNewMap = new Map<Id,Id>();
+      List<dm_OpportunityProducts__c> prodOppProds = [Select Id,TOTALPRICE__c,Quote_Temp__c from dm_OpportunityProducts__c where
+                                                      dm_Product_Name_New__c != null
+                             and dm_ProductId_New__c != null
+                                                      //and From_Prod__c=true
+                                                      and Quote_Temp__c in :quoteMap.keySet()];//quoteMap.keySet()];
+      //Prod Net Total for Quotes.
+      for(dm_OpportunityProducts__c oppProd : prodOppProds)
+      {
+          if(prdOppProdTotal.containsKey(oppProd.Quote_Temp__c))
+          {
+              Decimal amount = prdOppProdTotal.get(oppProd.Quote_Temp__c) + oppProd.TOTALPRICE__c;
+              prdOppProdTotal.put(oppProd.Quote_Temp__c,amount);
+          }
+          else prdOppProdTotal.put(oppProd.Quote_Temp__c,oppProd.TOTALPRICE__c);
+      }
+      //Quote Net Total
+      for(SBQQ__Quote__c q : quoteMap.Values())
+      {
+          if(dmQuoteTotal.containsKey(q.Id))//q.Id))
+          {
+              Decimal amount = dmQuoteTotal.get(q.Id);//q.Id);
+              dmQuoteTotal.put(q.Id,amount);//q.Id,amount);
+          }
+         else dmQuoteTotal.put(q.Id,q.SBQQ__NetAmount__c);//q.Id,q.SBQQ__NetAmount__c);
+      }
+      for(SBQQ__Quote__c q : quoteMap.Values())
+      {
+          if(dmQuoteTotal.containsKey(q.Id) && prdOppProdTotal.containsKey(q.Id))
+          {
+              // DIff
+              if(dmQuoteTotal.get(q.Id) != prdOppProdTotal.get(q.Id))
+              //if(dmQuoteTotal.get(q.Id) == prdOppProdTotal.get(q.Id))
+               //if(dmQuoteTotal.get(q.SBQQ__Source__c) == prdOppProdTotal.get(q.SBQQ__Source__c))
+              { if(! quoteToProdAmount.containsKey(q))
+                   quoteToProdAmount.put(q,prdOppProdTotal.get(q.Id));}//q.Id));}
+          }
+      }
+      //sendEmailWithAttachment(quoteToProdAmount);
+  }
+   public static void verifyMigratedQuoteAmountClonedQuotes(List<SBQQ__Quote__c> quotes,Map<SBQQ__Quote__c,Decimal> quoteToProdAmount )
+  {
+      //Get the Quote amount
+      //Get the Opp Prod Base - dm Prod = true Quote Amount
+      //And Map it.
+      Map<Id,SBQQ__Quote__c> quoteMap = new Map<Id,SBQQ__Quote__c>(quotes);
+      //Prod Total
+      Map<Id,Decimal> prdOppProdTotal = new Map<Id,Decimal>();
+      //Data Migration Quotes
+      Map<Id,Decimal> dmQuoteTotal = new Map<Id,Decimal>();
+      Map<Id,Id> quoteOldNewMap = new Map<Id,Id>();
+      for(SBQQ__Quote__c q : quotes)
+      {
+          if(q.SBQQ__Source__c != null)
+              quoteOldNewMap.put(q.SBQQ__Source__c,q.Id);
+      }
+      List<dm_OpportunityProducts__c> prodOppProds = [Select Id,TOTALPRICE__c,Quote_Temp__c from dm_OpportunityProducts__c where
+                                                      dm_Product_Name_New__c != null
+                             and dm_ProductId_New__c != null
+                                                      //and From_Prod__c=true
+                                                      and Quote_Temp__c in :quoteOldNewMap.keySet()];//quoteMap.keySet()];
+      //Prod Net Total for Quotes.
+      for(dm_OpportunityProducts__c oppProd : prodOppProds)
+      {
+          if(prdOppProdTotal.containsKey(oppProd.Quote_Temp__c))
+          {
+              Decimal amount = prdOppProdTotal.get(oppProd.Quote_Temp__c) + oppProd.TOTALPRICE__c;
+              prdOppProdTotal.put(oppProd.Quote_Temp__c,amount);
+          }
+          else prdOppProdTotal.put(oppProd.Quote_Temp__c,oppProd.TOTALPRICE__c);
+      }
+      //Quote Net Total
+      for(SBQQ__Quote__c q : quoteMap.Values())
+      {
+          if(dmQuoteTotal.containsKey(q.SBQQ__Source__c))//q.Id))
+          {
+              Decimal amount = dmQuoteTotal.get(q.SBQQ__Source__c);//q.Id);
+              dmQuoteTotal.put(q.SBQQ__Source__c,amount);//q.Id,amount);
+          }
+          else dmQuoteTotal.put(q.SBQQ__Source__c,q.SBQQ__NetAmount__c);//q.Id,q.SBQQ__NetAmount__c);
+      }
+      for(SBQQ__Quote__c q : quoteMap.Values())
+      {
+          if(dmQuoteTotal.containsKey(q.SBQQ__Source__c) && prdOppProdTotal.containsKey(q.SBQQ__Source__c))// q.Id) && prdOppProdTotal.containsKey(q.Id))
+          {
+              // DIff
+             // if(dmQuoteTotal.get(q.Id) != prdOppProdTotal.get(q.Id))
+              //if(dmQuoteTotal.get(q.Id) == prdOppProdTotal.get(q.Id))
+               if(dmQuoteTotal.get(q.SBQQ__Source__c) != prdOppProdTotal.get(q.SBQQ__Source__c))
+              { if(! quoteToProdAmount.containsKey(q))
+                   quoteToProdAmount.put(q,prdOppProdTotal.get(q.SBQQ__Source__c));}//q.Id));}
+          }
+      }
+      //sendEmailWithAttachment(quoteToProdAmount);
+  }
+    //Validate Amount
+   public static void  sendEmailWithAttachment(Map<SBQQ__Quote__c,Decimal> quoteToProdAmount)
+  {
+        String subject = 'SandBox Quote Amount with Prod Amount';
+        String body = 'Amount Validation';
+        // Define the email
+        Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
+        // Define email file attachment list
+        Messaging.EmailFileAttachment[] emailAttList = new List<Messaging.EmailFileAttachment>();
+        // Creating the CSV file
+         if(! quoteToProdAmount.isEmpty()){
+            // Creating the CSV file for error
+            String finalstr = 'Quote Id,Name,OpportunityId,Opportunity Name,Opportunity Stage,Quote Total Amount,Prod Total,Quote Term,'
+                              + 'Start_Date__c, End_Date__c\n';
+            String attName = 'Quote_WithMismatchAmount_' + system.now().format('YYYYMMDDhhmm') + '.csv';
+            for(SBQQ__Quote__c  q  : quoteToProdAmount.keySet()){
+				string recordString =  q.Id+'","'+q.Name+'","'+q.SBQQ__Opportunity2__c+'","'+q.SBQQ__Opportunity2__r.Name+'","'+q.SBQQ__Opportunity2__r.StageName+'","'+q.SBQQ__NetAmount__c +'","'+ quoteToProdAmount.get(q)+'","'+q.SBQQ__SubscriptionTerm__c +'","'+
+                                       q.SBQQ__StartDate__c+'","'+q.SBQQ__EndDate__c+'"\n';
+                finalstr = finalstr +recordString;
+            }
+    		// Create the email attachment
+            Messaging.EmailFileAttachment efa = new Messaging.EmailFileAttachment();
+            efa.setFileName(attName);
+            efa.setBody(Blob.valueOf(finalstr));
+            emailAttList.add(efa);
+       		}
+         // Sets the paramaters of the email
+         email.setSubject( subject );
+        //Need to get the List
+        List<User> userList = new List<User>();
+        List<String> toAddresses = new List<String>();
+        //toAddresses.add('revathi.mohan@nteligroup.com');
+        toAddresses.add('dipa.rathod@nteligroup.com');
+        toAddresses.add('swetha.kb@nteligroup.com');
+        toAddresses.add('anand.kumaraswamy@nteligroup.com');//-------------------TO DO
+        toAddresses.add('charumathi@nteligroup.com');
+        toAddresses.add('nageswaran.athithya@nteligroup.com');
+        email.setToAddresses( toAddresses);
+        email.setPlainTextBody( body );
+        email.setFileAttachments(emailAttList);
+        // Sends the email
+        Messaging.SendEmailResult [] r =
+        Messaging.sendEmail(new Messaging.SingleEmailMessage[] {email});
+    }
+    // The batch job finishes
+  public void finish(Database.BatchableContext bc){
+  //Error
+     if(quoteToProdAmount.size()>0)
+     sendEmailWithAttachment(quoteToProdAmount);}
+}
+@isTest
+public class dm_QuoteValidationBatchTest {
+@testsetup
+    static void setup(){
+        
+         //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        List<Account> accId = [Select ID from Account where Name = 'Test Account' Limit 1];
+        // Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        List<Opportunity> oppId = [Select ID from Opportunity where Name = 'Test Opportunity'  Limit 1];
+        
+         // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'pc1',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        insert objProduct;
+        
+        
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+         
+        // Quote Creation
+        SBQQ__Quote__c objQuote1 = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        insert objQuote1;
+        
+        // Quote Creation
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.DM_Quote__c = True;
+        objQuote.Manual_Fix__c = true; //Use when 2 nd query is used queryCPQClonedQuote
+        objQuote.SBQQ__Source__c =objQuote1.Id ; //Use when 2 nd query is used queryCPQClonedQuote
+        objQuote.SBQQ__Opportunity2__c = objOpportunity.Id;
+        objQuote.SBQQ__Primary__c = true;
+        objQuote.SBQQ__SubscriptionTerm__c = 24;
+        objQuote.DM_ErrorQuote__c=true; //Use when 2 nd query is used queryCPQClonedQuote
+        objQuote.DM_Quote__c=true;
+        insert objQuote;
+       
+        
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+        //Contract
+         Contract objContract = new Contract(
+            Status = 'Draft',
+            StartDate = objQuote.SBQQ__StartDate__c,
+            EndDate = objQuote.SBQQ__EndDate__c,
+            ContractTerm = 24,
+            AccountId = objQuote.SBQQ__Account__c, //objAccount.Id,
+            SBQQ__Opportunity__c = objQuote.SBQQ__Opportunity2__c, //objOpportunity.Id,
+            SBQQ__Quote__c = objQuote.Id
+        );
+    	objContract.Name = 'Test';
+         insert objContract;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+
+        //dm_cpq_Quote__c creation
+        
+        dm_cpq_Quote__c ObjdmCPQQuote = new dm_cpq_Quote__c();
+        ObjdmCPQQuote.Account__c = objAccount.Id;
+        ObjdmCPQQuote.Opportunity__c = objOpportunity.Id;
+        ObjdmCPQQuote.Opportunity_Opportunity_18_Digit_Id__c = oppId[0].Id;
+        ObjdmCPQQuote.Opportunity_Opportunity_Name__c = 'Very Good Ventures + 7 (13) Enterprise';
+        ObjdmCPQQuote.Payment_Term__c = 'Due Upon Receipt';
+        ObjdmCPQQuote.dm_StartDate__c = system.today();
+        ObjdmCPQQuote.dm_EndDate__c = system.today()+30;
+        
+        insert ObjdmCPQQuote;
+      //dm_OpportunityProducts__c Creation  
+      dm_OpportunityProducts__c Dmopppro= new dm_OpportunityProducts__c();
+      Dmopppro.dm_Product_Name_New__c =objProduct.Name;
+      Dmopppro.dm_Opp_Prod_Count_for_Opp__c=20;
+      Dmopppro.dm_ProductId_New__c=objProduct.id;
+      //Dmopppro.Quote_Temp__c=objQuote.Id; 
+      Dmopppro.Quote_Temp__c=objQuote1.Id;//for 2nd queryCPQClonedQuote
+      Dmopppro.DISCOUNT_AMOUNT_C__c=0;
+      dmopppro.TOTALPRICE__c=1400;
+      Dmopppro.Opportunity_Temp__c=objOpportunity.Id;
+      Dmopppro.LICENSE_PRICE_C__c=1;
+      Dmopppro.END_DATE_C__c = system.today()+30;
+      Dmopppro.ACCOUNT_ID_C__c=accId[0].id;
+      Dmopppro.OPPORTUNITYID__c=oppId[0].id;
+      Dmopppro.CONTRACT_ID_NEW_C__c=objContract.Id;
+      Dmopppro.START_DATE_C__c = system.today();
+      Dmopppro.Subscription_Term__c=1;
+      Dmopppro.OPPORTUNITY_NAME_C__c = objOpportunity.Name;
+      Dmopppro.PRODUCT_NAME_C__c='Test Product';
+      Dmopppro.PC_1_C__c='Licenses';
+      Dmopppro.TERM_C__c=36;
+      Dmopppro.LISTPRICE__c = 100;
+      Dmopppro.OPPPRODID_C__c='0063r000017Av1xAAC';
+      Dmopppro.PRODUCT2ID__c=objProduct.id;
+      Dmopppro.QUANTITY__c=1;
+      Dmopppro.MONTHLY_RECURRING_REVENUE_C__c=1;
+      Dmopppro.ACCOUNT_NAME_C__c='Test Account';
+      Dmopppro.PAYMENT_TERMS_C__c='Due Upon Receipt';
+
+      insert Dmopppro;
+}
+    @isTest
+    public static void executeTest(){
+        test.startTest();
+        dm_QuoteValidationBatch bc = new dm_QuoteValidationBatch();
+        Id batchId = Database.executeBatch(bc);
+        test.stopTest();
+                                                      
+    }
+}

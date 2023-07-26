@@ -1,0 +1,202 @@
+//dm_QuoteLookupBatch  
+//Created CPQ Quote Id update in Opp Prod for Quote Lines preparation
+public class dm_QuoteLookupBatch  implements Database.Batchable<sObject>,Database.Stateful {
+    public database.querylocator start(Database.BatchableContext BC)
+   {
+    
+   //Quote Line creation - Quote Id update
+   String queryCPQQuote = 'Select Id,Name,SBQQ__Source__c,SBQQ__BillingFrequency__c,SBQQ__Opportunity2__c,SBQQ__Opportunity2__r.Name,SBQQ__Account__c,'
+        +'SBQQ__NetAmount__c ,SBQQ__SubscriptionTerm__c,SBQQ__StartDate__c,SBQQ__EndDate__c  from SBQQ__Quote__c where '
+        +' Dm_Check__c = true and SBQQ__Primary__c = true ';//AND  Manual_Fix__c  = true';//DM_ErrorQuote__c = true and Manual_Fix__c  = true and SBQQ__Source__c != null
+       return Database.getQueryLocator(queryCPQQuote);
+}
+public void execute(Database.BatchableContext BC,List<SBQQ__Quote__c> quotes){
+    
+    updateQuoteLookupInOppProdExcel(quotes);
+
+    }
+     //***********For Quote Lines (Split__c)- Quote Line Preparation
+  public static void updateQuoteLookupInOppProdExcel(List<SBQQ__Quote__c> quotes)
+ {
+     //Quote_Temp
+     Map<String,SBQQ__Quote__c> quoteMap = new Map<String,SBQQ__Quote__c>();//(quotes);
+     Set<String> oppIds = new Set<String>();
+     for(SBQQ__Quote__c obj : quotes)
+     {
+         quoteMap.put(obj.SBQQ__Opportunity2__c,obj);
+     }
+     
+	 List<dm_OpportunityProducts__c > dmOppProd = [Select Id,END_DATE_C__c,ACCOUNT_ID_C__c,OPPORTUNITYID__c,CONTRACT_ID_NEW_C__c,
+                                              START_DATE_C__c,OPPORTUNITY_NAME_C__c from dm_OpportunityProducts__c
+                                                where OPPORTUNITYID__c != null and
+                                               OPPORTUNITYID__c in :quoteMap.keySet()];//Quote_Temp__c = null
+	 List<dm_OpportunityProducts__c> forUpdate = new List<dm_OpportunityProducts__c >();
+	for(dm_OpportunityProducts__c  obj : dmOppProd)
+	{
+    if(quoteMap.containsKey(obj.OPPORTUNITYID__c))
+    { 
+        obj.Quote_Temp__c = (quoteMap.get(obj.OPPORTUNITYID__c)).Id;
+     	forUpdate.add(obj);
+    }
+	}
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate,true);
+ }
+        // The batch job finishes
+  public void finish(Database.BatchableContext bc){ }
+}
+//dm_QuoteLookupBatchTest 
+@isTest
+public class dm_QuoteLookupBatchTest {
+@testSetup
+    static void setup(){
+        
+         //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        List<Account> accId = [Select ID from Account where Name = 'Test Account' Limit 1];
+        // Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        List<Opportunity> oppId = [Select ID from Opportunity where Name = 'Test Opportunity'  Limit 1];
+        
+         // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'pc1',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        insert objProduct;
+        
+        
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+         
+        // Quote Creation
+        SBQQ__Quote__c objQuote1 = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        insert objQuote1;
+        
+        // Quote Creation
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.DM_Quote__c = True;
+        objQuote.Manual_Fix__c = true;
+        objQuote.SBQQ__Source__c =objQuote1.Id ;
+        objQuote.SBQQ__Opportunity2__c = objOpportunity.Id;
+        
+        objQuote.SBQQ__SubscriptionTerm__c = 24;
+        
+        insert objQuote;
+        
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+
+        //dm_cpq_Quote__c creation
+        
+        dm_cpq_Quote__c ObjdmCPQQuote = new dm_cpq_Quote__c();
+        ObjdmCPQQuote.Account__c = objAccount.Id;
+        ObjdmCPQQuote.Opportunity__c = objOpportunity.Id;
+        ObjdmCPQQuote.Opportunity_Opportunity_18_Digit_Id__c = oppId[0].Id;
+        ObjdmCPQQuote.Opportunity_Opportunity_Name__c = 'Very Good Ventures + 7 (13) Enterprise';
+        ObjdmCPQQuote.Payment_Term__c = 'Due Upon Receipt';
+        ObjdmCPQQuote.dm_StartDate__c = system.today();
+        ObjdmCPQQuote.dm_EndDate__c = system.today()+30;
+        
+        insert ObjdmCPQQuote;
+        
+        //dm_OpportunityProducts__c creation 
+        
+        dm_OpportunityProducts__c ObjdmOppProduct = new dm_OpportunityProducts__c();
+		ObjdmOppProduct.OPPORTUNITYID__c = oppId[0].Id;
+        ObjdmOppProduct.ACCOUNT_ID_C__c  = accId[0].Id;
+        ObjdmOppProduct.OPPORTUNITY_NAME_C__c = 'Very Good Ventures + 7 (13) Enterprise';
+        ObjdmOppProduct.START_DATE_C__c = system.today();
+        ObjdmOppProduct.END_DATE_C__c = system.today()+30;
+        ObjdmOppProduct.PAYMENT_TERMS_C__c = '24';
+        
+        insert ObjdmOppProduct;
+}
+    @isTest
+    public static void dm_QuoteLookupBatchTest1(){
+        test.startTest();
+        dm_QuoteLookupBatch bc = new dm_QuoteLookupBatch();
+        Id batchId = Database.executeBatch(bc);
+        test.stopTest();
+                                                      
+    }
+}

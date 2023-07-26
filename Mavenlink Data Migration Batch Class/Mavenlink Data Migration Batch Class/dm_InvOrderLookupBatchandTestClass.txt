@@ -1,0 +1,221 @@
+//Lookup update - Order Id from Order ----to do manual fix remove for prod
+public class dm_InvOrderLookupBatch implements Database.Batchable<sObject>,Database.Stateful {
+public static final String LICENSES_PRODUCT_CATEGORY = 'Licenses'; 
+public database.querylocator start(Database.BatchableContext BC)
+{
+    String queryInvExcel = 'Select Id, Invoice__c,Opportunity__c,Product_Name__c,Product__c,ProductNameCPQ__c,Order__c,Quote__c,Invoice_Invoice_Number__c from dm_Invoice_InvoiceLine__c where Invoice_Invoice_Number__c != null and Opportunity__c != null and Quote__c != null '//;// and Order__c = null ';
+        +'and Quote__r.DM_Quote__c = true  and Quote__r.SBQQ__Ordered__c = true AND Quote__r.Manual_Fix__c = true';///Manual Fix
+    return Database.getQueryLocator(queryInvExcel);
+}
+public void execute(Database.BatchableContext BC,List<dm_Invoice_InvoiceLine__c> invsExl)
+{
+    updateInvoiceExcelOrderLookUp(invsExl);
+}
+//InvExcel Order 
+public static void updateInvoiceExcelOrderLookUp(List<dm_Invoice_InvoiceLine__c> invsExl)
+{
+      List<dm_Invoice_InvoiceLine__c> forUpdate = new List<dm_Invoice_InvoiceLine__c>();
+      Map<String,dm_Invoice_InvoiceLine__c> quoteToInvExl = new Map<String,dm_Invoice_InvoiceLine__c>();
+      Map<String,Order> quoteToOrder = new Map<String,Order>();
+      for(dm_Invoice_InvoiceLine__c invObj : invsExl)
+      {
+          if(! quoteToInvExl.containsKey(invObj.Quote__c))
+              quoteToInvExl.put(invObj.Quote__c,invObj);
+      }
+      List<Order> orders = [Select Id,Product_Category_Name__c,SBQQ__Quote__c,SBQQ__Quote__r.Customer_Billing_Email_Id_s__c from Order where 
+                            //SBQQ__Quote__r.DM_ErrorQuote__c = false and SBQQ__Quote__r.DM_Quote__c = true and  ----no manual fix
+                            Product_Category_Name__c = 'Licenses' and SBQQ__Quote__c in :quoteToInvExl.keySet()
+                            and SBQQ__Quote__r.DM_Quote__c = true  and SBQQ__Quote__r.SBQQ__Ordered__c = true AND SBQQ__Quote__r.Manual_Fix__c = true ];//For Manual fix
+      //Get the Quote to Order Map
+      for(Order orderObj : orders)
+      {
+          if(! quoteToOrder.containsKey(orderObj.SBQQ__Quote__c))
+              quoteToOrder.put(orderObj.SBQQ__Quote__c,orderObj);
+      }
+      //Map the Order to InvExcel using the Quote Id
+      for(dm_Invoice_InvoiceLine__c invObj : invsExl)
+      {
+          if(quoteToOrder.containsKey(invObj.Quote__c))
+          {
+              invObj.Order__c = quoteToOrder.get(invObj.Quote__c).Id;
+              invObj.CustomerBillingEmailId__c = quoteToOrder.get(invObj.Quote__c).SBQQ__Quote__r.Customer_Billing_Email_Id_s__c;
+              forUpdate.add(invObj);
+          }
+      }
+      if(forUpdate.size()>0)
+          Database.Update(forUpdate);
+  }
+
+// The batch job finishes
+  public void finish(Database.BatchableContext bc){ }
+}
+@isTest
+public class dm_InvOrderLookupBatchTest {
+    @testSetup
+    static void setupData(){
+        //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        
+        //Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+       
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Licenses',
+            'pc1',
+            'pc2',
+            'pc3',
+            'Recurring',
+            null,
+            'Recurring',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null
+        );
+       objProduct.SBQQ__ChargeType__c = 'Recurring';
+       objProduct.Product_Category__c = 'Licenses';
+       insert objProduct;
+        
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        
+        insert objPriceBookEntry;
+       
+        // Quote Creation     
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        );
+        
+        objQuote.SBQQ__BillingFrequency__c= 'Annual';
+        objQuote.Customer_Billing_Email_Id_s__c = 'test@gmail.com';
+        objQuote.SBQQ__Ordered__c = true;
+        objQuote.Manual_Fix__c = true;
+        objQuote.DM_Quote__c = true;
+        insert objQuote;
+        
+        
+         // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = 'Annual';
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+              
+        insert objOrder;
+        
+        
+        // blng__Invoice__c creation
+        blng__Invoice__c objBlngInvoice = TestDataUtility.createBlngInvoice(
+            objAccount.Id,
+            objOrder.Id
+        );
+        
+        objBlngInvoice.Invoice_Admin_Status__c = 'Active';
+        objBlngInvoice.Product_Category__c = 'Licenses';
+        objBlngInvoice.Custom_Invoice_Date__c = Date.today().addDays(-1);
+        objBlngInvoice.blng__InvoiceDate__c = Date.today().addDays(-1);
+        objBlngInvoice.Product_Categories__c = 'Licenses';
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Zuora_Invoice_Number__c = '12345';
+        objBlngInvoice.DM_Invoice__c = true;
+        objBlngInvoice.Invoice_Number__c = 0;
+        
+        insert objBlngInvoice;
+        
+        //dm_Invoice_InvoiceLine__c Creation
+        dm_Invoice_InvoiceLine__c ObjdmInvoice = new dm_Invoice_InvoiceLine__c();
+        ObjdmInvoice.Opportunity__c = objOpportunity.id;
+        ObjdmInvoice.Invoice_Invoice_Number__c= 'aEf7800000001s0';
+        
+        ObjdmInvoice.Quote__c = objQuote.id ;
+        ObjdmInvoice.Invoice__c = objBlngInvoice.Id;
+        ObjdmInvoice.Product_Name__c = 'Test Opportunity';
+        ObjdmInvoice.Product__c = objProduct.Id;
+        ObjdmInvoice.ProductNameCPQ__c = 'Test Product';
+        
+        insert ObjdmInvoice;
+        
+        //BillingRule Creation
+       	blng__BillingRule__c ObjBillingRule = new blng__BillingRule__c();
+        ObjBillingRule.Name = 'Test Billing Rule';
+        ObjBillingRule.blng__InitialBillingTrigger__c = 'Order Product Activation Date';
+        ObjBillingRule.blng__PartialPeriodTreatment__c = 'Combine';
+        ObjBillingRule.blng__PeriodTreatmentForBTDO__c = 'Exclude Billing Day of Month';
+        ObjBillingRule.blng__Active__c = True;
+        ObjBillingRule.blng__GenerateInvoices__c = 'Yes';
+        
+        insert ObjBillingRule;
+        
+        //OrderItem or Order product creation
+        OrderItem ObjOrderProduct = new OrderItem();
+        ObjOrderProduct.OrderId = objOrder.id;
+        ObjOrderProduct.Product2Id = objProduct.Id;
+        ObjOrderProduct.SBQQ__QuoteLine__c = objQuoteLine.Id;
+        ObjOrderProduct.SBQQ__ChargeType__c = 'Recurring';
+        ObjOrderProduct.SBQQ__BillingFrequency__c = 'Annual';
+        ObjOrderProduct.PricebookEntryId = objPriceBookEntry.Id;
+        ObjOrderProduct.UnitPrice = 1000;
+        ObjOrderProduct.SBQQ__BillingType__c = 'Advance';
+        ObjOrderProduct.blng__BillingRule__c = ObjBillingRule.Id;
+        ObjOrderProduct.Quantity = 1;
+        insert ObjOrderProduct;
+      
+    }
+      @isTest 
+    public static void dm_InvOrderLookupBatchTest1(){
+        Test.startTest();
+        dm_InvOrderLookupBatch bc = new dm_InvOrderLookupBatch();
+        Id batchId = Database.executeBatch(bc);
+        Test.stopTest();
+}
+}

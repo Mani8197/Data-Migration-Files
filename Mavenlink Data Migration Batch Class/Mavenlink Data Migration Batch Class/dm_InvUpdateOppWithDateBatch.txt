@@ -1,0 +1,136 @@
+//Step 1: Before run this batch run the dm_InvUpdateOppBatch.
+//Step 2: After this batch even if more records exists without Opportunity names proceed for the dm_InvUpdateOppWithDateBatch
+public class dm_InvUpdateOppWithDateBatch implements Database.Batchable<sObject>,Database.Stateful {
+public database.querylocator start(Database.BatchableContext BC)
+   {
+		System.debug('Inside the Start Method ====>');
+	//Get the Inv line with out Opportunity,status limits and date filters
+	//Added the new flag inside the soql
+    String invLineTemp = 'Select Id, Account__c,Invoice__c,CreatedDate,Invoice_Invoice_Date__c,Opportunity__c,Product_Name__c,Invoice_Item_Quantity__c,Product__c,ProductNameCPQ__c,Order__c,Quote__c,Invoice_Invoice_Number__c '+
+        ' from dm_Invoice_InvoiceLine__c where Invoice_Invoice_Number__c != null and Subscription_Opportunity_Name__c = null and dm_filtered_records__c = True ';
+		System.debug('Value in the Query ------>' + invLineTemp);    
+    return Database.getQueryLocator(invLineTemp);
+    }
+    public void execute(Database.BatchableContext BC,List<dm_Invoice_InvoiceLine__c> invExl)
+    {
+        
+        System.debug('Inside the Execute Method ------>');
+        List<dm_Invoice_InvoiceLine__c> forUpdate = new List<dm_Invoice_InvoiceLine__c>();
+        Map<dm_Invoice_InvoiceLine__c, String> invLinesToOppIdUpdate = new Map<dm_Invoice_InvoiceLine__c, String>();
+        //Map<String,List<dm_Invoice_InvoiceLine__c>> invProdToInvMap = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+        //Step 1: Get the Invoices for Product
+        Map<String,List<dm_Invoice_InvoiceLine__c>> prodInvLinesMap = getProductToLines(invExl); 
+        //Step 2: Get all the Opportunity Product for the Invoice Products 
+        List<OpportunityLineItem> oppLineItem  = [SELECT Id, Name, Opportunity.Name,Product2Id,Product2.Name,Opportunity.CloseDate FROM OpportunityLineItem WHERE Product2Id IN :prodInvLinesMap.keySet()];
+        System.debug('oppLineItem size:'+oppLineItem.size());
+        //Step 3: Map the Opp Products for Prod To Opp Prod 
+        Map<String,List<OpportunityLineItem>> prodToOppProdMap = getProductToOppProducts(oppLineItem);
+        //Loop through the Product Invoices Map
+        //System.debug('prodToOppProdMap size:'+prodToOppProdMap.size());
+        //System.debug('prodInvLinesMap size:'+prodInvLinesMap.size());
+        for(String prodId : prodInvLinesMap.keySet()){
+            //Get the list of Inv Lines for the current product
+            List<dm_Invoice_InvoiceLine__c> tempInvs = prodInvLinesMap.get(prodId);
+            if(prodToOppProdMap.containsKey(prodId)){
+                System.debug('prodToOppProdMap.containsKey(prodId):'+prodToOppProdMap.containsKey(prodId) + ' - ProdId:'+prodId);
+                //Get the list of Opp Lines for the current product
+                List<OpportunityLineItem> tempOppProds = prodToOppProdMap.get(prodId);
+                for(dm_Invoice_InvoiceLine__c invRec : tempInvs){
+                    //Get the Mapped Record
+                    String oppId = getMappedRecord(tempOppProds,invRec);
+                    System.debug('oppId:'+oppId);
+                    if(! invLinesToOppIdUpdate.containsKey(invRec) && oppId != null)
+                               invLinesToOppIdUpdate.put(invRec,oppId); 
+                }
+            }
+            
+        }
+        System.debug('invLinesToOppIdUpdate:'+invLinesToOppIdUpdate.size());
+                
+        //Update the Invoice Lines with Opp Id
+        if(invLinesToOppIdUpdate.size()>0)
+        {
+            for(dm_Invoice_InvoiceLine__c invoice : invLinesToOppIdUpdate.keySet()){
+                invoice.Subscription_Opportunity_Name__c = invLinesToOppIdUpdate.get(invoice);
+                System.debug('Invoice Id:'+invoice.Id);
+                forUpdate.add(invoice);
+            }
+        }
+        //Update the records
+        if(forUpdate.size()>0)//System.debug('forUpdate size:'+forUpdate.size());
+           Database.update(forUpdate,false);
+       
+///Loop through the invLinesForUpdate and update the Invoice with Opp Id
+//Update statement
+    /*
+      for(dm_Invoice_InvoiceLine__c invoice : invLinesForUpdate){
+				// Invoice need to be updated with opp Id
+				List<Invoice> tobeUpdated = new List<Invoice>();
+				 
+					blng__Invoice__c invo = new blng__Invoice__c();
+
+        }
+     
+*/
+         
+        //Step 4: Loop Through the prodInvLines ===>Key is prodid 
+        //If prodInvLines key - Product is in prodToOppProdMap
+        //          then Collect the List of Invoices=TempInv and List of Opp Products=TempOppProds === 34 to 40 in InvUpdateOppBatch
+        //                       {Start Loop Through the TempInv ==> Inside the loop ,  
+        //                       {Inner ForLoop through the TempOppProds 
+        //                         Compare TempInv.Invoice Date()  == OppProd.Opportunity.ClosedDate || Compare TempInv.Invoice Date() +10Days  == OppProd.Opportunity.ClosedDate || Compare TempInv.Invoice Date() -10Days  == OppProd.Opportunity.ClosedDate
+        //                         Collect the Opp Id in a Map<Invoice Id,OppProd.OpportunityId>
+        //                         }   
+        //                       }
+    }
+    //Helper
+    private static String getMappedRecord(List<OpportunityLineItem> tempOppProds,dm_Invoice_InvoiceLine__c invRec)
+    {
+        String oppId = null;
+        for(OpportunityLineItem oppProdRec : tempOppProds){
+           System.debug('invRec.CreatedDate:'+invRec.CreatedDate + 'oppProdRec.Opportunity.CloseDate:'+oppProdRec.Opportunity.CloseDate);
+            if(invRec.CreatedDate == oppProdRec.Opportunity.CloseDate + 30 || 
+             invRec.CreatedDate == oppProdRec.Opportunity.CloseDate - 30)
+            {
+               System.debug('invRec:'+invRec.Id + 'Opp Id:'+oppProdRec.OpportunityId);
+               oppId = oppProdRec.Opportunity.Name; 
+                break;
+            }
+        }
+        return oppId;
+    }
+    public static Map<String,List<dm_Invoice_InvoiceLine__c>> getProductToLines(List<dm_Invoice_InvoiceLine__c> invs)
+    {
+        Map<String,List<dm_Invoice_InvoiceLine__c>> prodToLines = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+        for(dm_Invoice_InvoiceLine__c inv : invs)
+        {
+            if(prodToLines.containsKey(inv.Product__c))
+                prodToLines.get(inv.Product__c).add(inv);
+            else prodToLines.put(inv.Product__c,new List<dm_Invoice_InvoiceLine__c>{inv});
+            
+        }
+        return prodToLines;
+    }
+    
+    public static Map<String, List<OpportunityLineItem>> getProductToOppProducts(List<OpportunityLineItem> oppProd){
+        
+        Map<String, List<OpportunityLineItem>> oppProdLines = new Map<String, List<OpportunityLineItem>>();
+        
+        for(OpportunityLineItem opLi : oppProd){
+           // System.debug('opLi.Product2.Id_'+opLi.Product2Id);
+            if(oppProdLines.containsKey(opLi.Product2.Id)){
+                oppProdLines.get(opLi.Product2Id).add(opLi);
+            }else{
+                oppProdLines.put(opLi.Product2Id, new List<OpportunityLineItem>{opLi});
+            }
+        }
+        
+        return oppProdLines;
+        
+    }
+    public void finish(Database.BatchableContext BC)
+ {
+    System.debug('Batch Executed Successfully----> ');
+ }
+
+}

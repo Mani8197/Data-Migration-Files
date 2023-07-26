@@ -1,0 +1,61 @@
+//Batch to calculate and update Roll up of invoice lines under Order Product
+//ENABLE line: temp.blng__PendingBillings__c = (temp.blng__PendingBillings__c == null) ? (0 - ordProdToinvLineAmntMap.get(ordProdId)) : (temp.blng__PendingBillings__c - ordProdToinvLineAmntMap.get(ordProdId));
+//and the above line should be run one time.
+public class dm_InvLineRollupOrderProdBatch implements Database.Batchable<sObject>,Database.Stateful {
+    //Validation
+//Compare the Total
+public Map<SBQQ__Quote__c,Decimal> quoteToProdAmount = new Map<SBQQ__Quote__c,Decimal>();
+public database.querylocator start(Database.BatchableContext BC)
+{
+    String queryOrderItems = 'Select Id,Product2Id,blng__BilledAmountwithouttax__c,blng__PendingBillings__c from OrderItem where Order.DM_Order__c = true ';//and blng__BilledAmountwithouttax__c = 0';
+    return Database.getQueryLocator(queryOrderItems);
+}
+public void execute(Database.BatchableContext BC,List<OrderItem> ordProds)
+{
+        //Get the Invoice line for each Order Prod
+        //And roll up the amount and update Opp Prod.
+        updateOrderProducts(ordProds);
+     }
+public static void updateOrderProducts(List<OrderItem> ordProds )
+{
+       Map<Id,OrderItem> ordProdsMap = new Map<Id,OrderItem>(ordProds);
+      
+      //Get the Invoice lines for the Opp Prod Ids
+      List<blng__InvoiceLine__c> invLines = [Select Id,blng__Invoice__c,blng__OrderProduct__c,blng__Subtotal__c, blng__Product__c,Order__c from blng__InvoiceLine__c where 
+                       blng__OrderProduct__c != null and blng__Invoice__r.DM_Invoice__c = true and blng__OrderProduct__c in :ordProdsMap.keySet()];
+	 //Get the map for the Order and Order Products
+	  Map<Id,List<blng__InvoiceLine__c>> ordProdToinvLineMap = new Map<Id,List<blng__InvoiceLine__c>>();
+      Map<Id,Decimal> ordProdToinvLineAmntMap = new Map<Id,Decimal>();
+      for(blng__InvoiceLine__c invLRec : invLines)
+      {
+          if(ordProdToinvLineAmntMap.containsKey(invLRec.blng__OrderProduct__c)){
+              Decimal amount = ordProdToinvLineAmntMap.get(invLRec.blng__OrderProduct__c);
+              ordProdToinvLineAmntMap.put(invLRec.blng__OrderProduct__c,amount + invLRec.blng__Subtotal__c);
+          }
+          else ordProdToinvLineAmntMap.put(invLRec.blng__OrderProduct__c,invLRec.blng__Subtotal__c);
+      }
+    //For Update
+    List<OrderItem> forUpdate = new  List<OrderItem>();
+    //Map the InvLine Order with Order Map
+      for(Id ordProdId : ordProdsMap.keySet())
+      {
+         //Update the Order Prod value
+         if(ordProdToinvLineAmntMap.containsKey(ordProdId))
+         { OrderItem temp = ordProdsMap.get(ordProdId);
+          temp.blng__BilledAmountwithouttax__c = ordProdToinvLineAmntMap.get(ordProdId);
+         // temp.blng__PendingBillings__c = (temp.blng__PendingBillings__c == null) ? (0 - ordProdToinvLineAmntMap.get(ordProdId)) : (temp.blng__PendingBillings__c - ordProdToinvLineAmntMap.get(ordProdId));
+          System.debug('ordProdToinvLineAmntMap.get(ordProdId):'+ordProdToinvLineAmntMap.get(ordProdId) + ' :ordProdId:'+ordProdId);
+          forUpdate.add(temp);
+         }             
+      }
+    //Update
+    System.debug('forUpdate:'+forUpdate.size());
+    if(forUpdate.size()>0)
+       Database.update(forUpdate);
+      
+  }
+ 
+// The batch job finishes
+public void finish(Database.BatchableContext bc){
+}
+}

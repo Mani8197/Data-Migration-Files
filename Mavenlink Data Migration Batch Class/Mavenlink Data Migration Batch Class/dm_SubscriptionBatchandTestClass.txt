@@ -1,0 +1,447 @@
+global class dm_SubscriptionBatch implements Database.Batchable<sObject>,Database.Stateful{
+    global Map<Id, String> errorMap;
+    global Map<Id, SObject> IdToSObjectMap;
+    global Map<String,List<dm_cpq_Product__c>> productToOppMap = new Map<String,List<dm_cpq_Product__c>>();
+    global Map<Id, String> successMap;
+    //Database.executeBatch(new dm_SubscriptionBatch(),200);TO do change it manal fix flag - prod move
+global database.querylocator start(Database.BatchableContext BC)
+{
+    //String queryProdLookup = 'Select Id,Name,dm_ListPrice_New__c,dm_Quantity_New__c,Account_Name__c,dm_Product_Name_New__c,Subscription_Opportunity_Name__c from dm_Zuora_Subscription__c where Account_CRM_Account_ID__c != null and Subscription_Opportunity_Name__c != null';
+    String queryCPQQl = 'Select Id,SBQQ__Quote__c,SBQQ__Quote__r.SBQQ__Account__c,SBQQ__Quote__r.SBQQ__Account__r.Name, SBQQ__Quote__r.SBQQ__Opportunity2__c,'
+        +' SBQQ__Quantity__c,SBQQ__Product__c,SBQQ__Product__r.Name,List_Price__c,SBQQ__StartDate__c,SBQQ__EndDate__c,'
+        +' SBQQ__SubscriptionTerm__c,SBQQ__Dimension__c,SBQQ__BillingFrequency__c,SBQQ__BillingType__c,SBQQ__ChargeType__c,'
+        +' SBQQ__Quote__r.SBQQ__Opportunity2__r.Name,SBQQ__SegmentIndex__c,SBQQ__SegmentLabel__c,SBQQ__SegmentKey__c,SBQQ__Product__r.SBQQ__SubscriptionType__c,'
+        +' SBQQ__Quote__r.Contract_dm__c,SBQQ__SubscriptionPricing__c,SBQQ__Number__c from SBQQ__QuoteLine__c where  '
+        + ' DM_QuoteLine__c= true and SBQQ__Quote__r.DM_ErrorQuote__c = false and SBQQ__Quote__r.SBQQ__Ordered__c = true and SBQQ__Quote__r.DM_Quote__c = true '
+       // + ' DM_QuoteLine__c= true and SBQQ__Quote__r.Manual_Fix__c = true and SBQQ__Quote__r.SBQQ__Ordered__c = true '//For manual fix
+        + ' and SBQQ__ChargeType__c = \'Recurring\' ';//and SBQQ__StartDate__c >Today ';
+    return Database.getQueryLocator(queryCPQQl);
+}
+ global void execute(Database.BatchableContext BC,List<SBQQ__QuoteLine__c> qlList)
+{
+    //Only Quote Line data migrated
+    //We are not using these fields - From Excel - Status,Zuora Account Number,Zuora Account Record Id,Zuora Subscription Record Id,Zuora Subscription Original Id
+     createCPQSubscriptionsFromQLineandExcel(qlList);
+} 
+global void createCPQSubscriptionsFromQLineandExcel(List<SBQQ__QuoteLine__c> qlList)
+{
+    List<SBQQ__Subscription__c> subsForInsert = new List<SBQQ__Subscription__c>();
+    //Get the Account Name, Opportunity Name from QL
+    Set<String> accNames = new Set<String>();
+    Set<String> oppNames = new Set<String>();
+    for(SBQQ__QuoteLine__c ql : qlList)
+    {
+        accNames.add(ql.SBQQ__Quote__r.SBQQ__Account__r.Name);
+        oppNames.add(ql.SBQQ__Quote__r.SBQQ__Opportunity2__r.Name); 
+    }
+    //Filter Contracts in Org
+    Set<String> cIds = new Set<String>();
+	for(SBQQ__QuoteLine__c ql : qlList)
+	{cIds.add(ql.SBQQ__Quote__r.Contract_dm__c);}
+    //Map<String,Contract> cIdsInOrg = new Map<String,Contract>();
+    List<Contract> conts = [Select Id from Contract where Id in:cIds];
+    Map<String,Contract> cIdsInOrg = new Map<String,Contract>(conts);
+   System.debug('Contracts in Org:'+conts.size());
+   /* Map<String,List<dm_Zuora_Subscription__c>> accOppToSubExl = new Map<String,List<dm_Zuora_Subscription__c>>();
+    List<dm_Zuora_Subscription__c> subExl = [Select Id,Subscription_Status__c,Account_Account_Number__c,Account_ID__c,Account_CRM_Account_ID__c,Subscription_ID__c,
+                                             Subscription_Original_ID__c,Account_Name__c,Subscription_Opportunity_Name__c 
+                                             from dm_Zuora_Subscription__c Where
+                                             Account_Name__c in  :accNames and Subscription_Opportunity_Name__c in :oppNames];
+    *///SBQQ__Quote__r.SBQQ__Account__c, SBQQ__Quote__r.SBQQ__Opportunity2__c, SBQQ__Quantity__c, SBQQ__Product__c, 
+    //SBQQ__Product__r.Name, List_Price__c, SBQQ__StartDate__c, SBQQ__EndDate__c, SBQQ__SubscriptionTerm__c, SBQQ__Dimension__c, SBQQ__BillingFrequency__c, SBQQ__BillingType__c, SBQQ__ChargeType__c, SBQQ__SegmentIndex__c, SBQQ__SegmentLabel__c, SBQQ__SegmentKey__c, SBQQ__Product__r.SBQQ__SubscriptionType__c, SBQQ__SubscriptionPricing__c from SBQQ__QuoteLine__c where DM_QuoteLine__c= true
+    for(SBQQ__QuoteLine__c ql:  qlList){
+        if(cIdsInOrg.containsKey(ql.SBQQ__Quote__r.Contract_dm__c))
+        {
+         SBQQ__Subscription__c sub = new SBQQ__Subscription__c();
+        sub.SBQQ__Account__c = ql.SBQQ__Quote__r.SBQQ__Account__c;
+        sub.Opportunity__c = ql.SBQQ__Quote__r.SBQQ__Opportunity2__c;
+        sub.SBQQ__Quantity__c = ql.SBQQ__Quantity__c;
+        sub.SBQQ__Contract__c = ql.SBQQ__Quote__r.Contract_dm__c;
+        sub.SBQQ__Product__c = ql.SBQQ__Product__c;
+        sub.SBQQ__SegmentQuantity__c = ql.SBQQ__Quantity__c;
+        sub.SBQQ__SegmentStartDate__c = ql.SBQQ__StartDate__c;
+        sub.SBQQ__SegmentEndDate__c = ql.SBQQ__EndDate__c;
+        sub.SBQQ__SegmentIndex__c = ql.SBQQ__SegmentIndex__c;
+        sub.Status__c = 'Active';
+        sub.SBQQ__SegmentKey__c = ql.SBQQ__SegmentKey__c;
+        sub.SBQQ__SegmentLabel__c = ql.SBQQ__SegmentLabel__c;
+        sub.SBQQ__Number__c = ql.SBQQ__Number__c;
+        sub.SBQQ__ListPrice__c = ql.List_Price__c;
+        sub.Current_Term__c = ql.SBQQ__SubscriptionTerm__c;
+        sub.SBQQ__BillingFrequency__c = ql.SBQQ__BillingFrequency__c;
+        sub.SBQQ__BillingType__c = ql.SBQQ__BillingType__c;
+        sub.SBQQ__Dimension__c = ql.SBQQ__Dimension__c;
+        sub.SBQQ__ChargeType__c = ql.SBQQ__ChargeType__c;
+        sub.SBQQ__SubscriptionPricing__c = ql.SBQQ__SubscriptionPricing__c;
+        //sub.SBQQ__SubscriptionType__c = 'Renewable';
+        sub.SBQQ__QuoteLine__c = ql.Id;
+        //Migration Flag
+        sub.DM_Subscription__c = true;
+        subsForInsert.add(sub);
+    }
+    }
+    
+    if(subsForInsert.size()>0)
+     //sendEmail(subsForInsert);   
+     Database.insert(subsForInsert);
+    
+}
+    /*
+public void sendEmail(List<SBQQ__Subscription__c> subscriptions)
+ {
+      String subject = 'Subscriptions - Temp for Load';
+      // Define the email
+       Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
+       // Define email file attachment list
+       Messaging.EmailFileAttachment[] emailAttList = new List<Messaging.EmailFileAttachment>();
+       System.debug('Email:'+subscriptions.size());
+        // Creating the CSV file for successful updates
+         String finalstr = 'SBQQ__Account__c,Opportunity__c,SBQQ__Quantity__c,SBQQ__Contract__c,SBQQ__Product__c,SBQQ__SegmentQuantity__c,'
+             +'SBQQ__SegmentStartDate__c,SBQQ__SegmentEndDate__c,SBQQ__SegmentIndex__c,Status__c,SBQQ__SegmentKey__c,SBQQ__SegmentLabel__c,'
+             +'SBQQ__Number__c,SBQQ__ListPrice__c,Current_Term__c,SBQQ__BillingFrequency__c,SBQQ__BillingType__c,SBQQ__Dimension__c,SBQQ__ChargeType__c,'
+             +'SBQQ__SubscriptionPricing__c,SBQQ__SubscriptionType__c,DM_Subscription__c\n';
+         String attName = 'Subscriptions' + system.now().format('YYYYMMDDhhmm') + '.csv';
+		 for(SBQQ__Subscription__c p : subscriptions)
+          {
+            String recordString = p.SBQQ__Account__c+'","'+p.Opportunity__c+'","'+p.SBQQ__Quantity__c
+               +'","'+p.SBQQ__Contract__c+'","' +p.SBQQ__Product__c+'","'+p.SBQQ__SegmentQuantity__c+'","'+p.SBQQ__SegmentStartDate__c+'","'
+                +p.SBQQ__SegmentEndDate__c+'","'+p.SBQQ__SegmentIndex__c+'","'+p.Status__c+'","'+p.SBQQ__SegmentKey__c+'","'
+                +p.SBQQ__SegmentLabel__c+'","'+p.SBQQ__Number__c+'","'+p.SBQQ__ListPrice__c+'","'+p.Current_Term__c+'","'
+                +p.SBQQ__BillingFrequency__c+'","'+p.SBQQ__BillingType__c+'","'+p.SBQQ__Dimension__c+'","'+p.SBQQ__ChargeType__c+'","'
+                +p.SBQQ__SubscriptionPricing__c+'","'+p.SBQQ__SubscriptionType__c+'","'+'True"\n';
+          
+           finalstr = finalstr +recordString;
+         }
+         // Create the email attachment    
+         Messaging.EmailFileAttachment efa = new Messaging.EmailFileAttachment();
+         efa.setFileName(attName);
+         efa.setBody(Blob.valueOf(finalstr));
+         emailAttList.add(efa);
+           
+        // Sets the paramaters of the email
+         String body = 'Test';
+         email.setSubject( subject );
+         email.setToAddresses( new String[] {'revathi.mohan@nteligroup.com'} );
+         email.setPlainTextBody( body );
+         email.setFileAttachments(emailAttList);
+         // Sends the email
+         Messaging.SendEmailResult [] r =
+                Messaging.sendEmail(new Messaging.SingleEmailMessage[] {email});
+ }
+global void execute1(Database.BatchableContext BC,List<dm_Zuora_Subscription__c> prodList)
+{
+     insertCPQSubscriptions(prodList);
+}
+    
+global void insertCPQSubscriptions(List<dm_Zuora_Subscription__c> subscriptions)
+ {     
+     Set<String> oppNames = new Set<String>();
+     Set<String> accNames = new Set<String>();
+     Map<Id,dm_Zuora_Subscription__c> subMapForUpdate = new Map<Id,dm_Zuora_Subscription__c>();
+    for(dm_Zuora_Subscription__c sub : subscriptions)
+     {
+        oppNames.add(sub.Subscription_Opportunity_Name__c);
+         accNames.add(sub.Account_Name__c);
+      }
+     //Get the Contracts based on Opp names with Contract Order Name
+     List<dm_cpq_Product__c> pdtsForSub = [Select Id,Product__c,Opportunity_Name__c,Account_Name__c,dm_Product_Name_New__c,Product_Name__c,Product_Code__c,Quantity__c,List_Price__c 
+                                            from dm_cpq_Product__c where Opportunity_Name__c in :oppNames and Account_Name__c in :accNames and Product__c != null];
+                                         
+     System.debug('pdtsForSub.size:'+pdtsForSub.size());
+     for(dm_Zuora_Subscription__c sub : subscriptions)
+     {
+		 for(dm_cpq_Product__c prod : pdtsForSub)
+    	 {
+             if(sub.Account_Name__c == prod.Account_Name__c && sub.Subscription_Opportunity_Name__c == prod.Opportunity_Name__c
+               )
+             {
+                 sub.dm_ListPrice_New__c = prod.List_Price__c;
+                 sub.dm_Quantity_New__c = prod.Quantity__c;
+                 sub.Product__c = prod.Product__c;
+                 sub.dm_Product_Name_New__c = prod.dm_Product_Name_New__c;
+             }
+                 if(! subMapForUpdate.containsKey(sub.Id))
+                     subMapForUpdate.put(sub.Id,sub);
+     	 }
+     }
+   if(subMapForUpdate.size()>0)
+       Database.update(subMapForUpdate.Values());
+ }
+ global void insertCPQSubscriptionsTemp(List<dm_Zuora_Subscription__c> subscriptions)
+ {     
+     Set<String> oppNames = new Set<String>();
+     //CPQ suffixed Produc2
+     List<Product2> cpqProducts = [Select Id,Name,ProductCode from Product2 where Name like '%CPQ'];
+     Map<Id,Product2> cpqProductsMap = new Map<Id,Product2>(cpqProducts);
+     Set<String> productsName = new Set<String>();
+     //Get the Product Code with Name in a set
+     for(Product2 p : cpqProducts)  
+     {
+         productsName.add(p.Name);
+         System.debug('Product Name:'+p.Name);
+     }
+	 for(dm_Zuora_Subscription__c sub : subscriptions)
+     {
+        oppNames.add(sub.Subscription_Opportunity_Name__c);
+      }
+     //Get the Contracts based on Opp names with Contract Order Name
+     List<dm_cpq_Product__c> pdtsForOpps = [Select Id,Opportunity_Name__c,Account_Name__c,Product_Name__c,Product_Code__c,Quantity__c,List_Price__c from dm_cpq_Product__c where Opportunity_Name__c in :oppNames];
+     System.debug('pdtsForOpps.size:'+pdtsForOpps.size());
+     for(dm_cpq_Product__c prod : pdtsForOpps)
+     {
+         System.debug('Name:-CPQ:'+prod.Product_Name__c+'-CPQ');
+         System.debug('Name:-CPQ'+productsName.contains(prod.Product_Name__c+'-CPQ'));
+         System.debug('Name: -CPQ'+productsName.contains(prod.Product_Name__c+ ' -CPQ'));
+         System.debug('Name: - CPQ'+productsName.contains(prod.Product_Name__c+' - CPQ'));
+         System.debug('Name: CPQ'+productsName.contains(prod.Product_Name__c+' CPQ'));
+           
+         //Check for the Product name in CPQ
+         if(productsName.contains(prod.Product_Name__c+'-CPQ') || productsName.contains(prod.Product_Name__c+ ' -CPQ')
+            || productsName.contains(prod.Product_Name__c+' - CPQ') || productsName.contains(prod.Product_Name__c+' CPQ'))
+            {
+                String prodNameWithCPQ = '';
+                if(productsName.contains(prod.Product_Name__c+'-CPQ'))
+                    prodNameWithCPQ = prod.Product_Name__c+'-CPQ';
+                 else if(productsName.contains(prod.Product_Name__c+ ' -CPQ'))
+                     prodNameWithCPQ = prod.Product_Name__c+ ' -CPQ';
+                 else if(productsName.contains(prod.Product_Name__c+' - CPQ'))
+                     prodNameWithCPQ = prod.Product_Name__c+' - CPQ';
+                 else if (productsName.contains(prod.Product_Name__c+' CPQ'))
+                     prodNameWithCPQ = prod.Product_Name__c+' CPQ';
+          if(productToOppMap.containsKey(prodNameWithCPQ))
+           productToOppMap.get(prodNameWithCPQ).add(prod);
+          else productToOppMap.put(prodNameWithCPQ,new List<dm_cpq_Product__c>{prod});
+           }
+           }
+      System.debug('productToOppMap'+productToOppMap.size());
+    
+           
+    
+ }
+ public void sendEmail(Map<String,List<dm_cpq_Product__c>> productToOppMap)
+ {
+      String subject = 'Account - Apex Batch Result for AccountUpdateBatch';
+      // Define the email
+       Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
+       // Define email file attachment list
+       Messaging.EmailFileAttachment[] emailAttList = new List<Messaging.EmailFileAttachment>();
+       System.debug('Email:'+productToOppMap.size());
+       if(! productToOppMap.isEmpty()) {
+         // Creating the CSV file for successful updates
+         String finalstr = 'Account, OppName,ProductName,ProductCode,Quantity,ListPrice \n';
+         String attName = 'Subscriptions' + system.now().format('YYYYMMDDhhmm') + '.csv';
+         for(String name  : productToOppMap.keySet()){
+          List<dm_cpq_Product__c> prods = productToOppMap.get(name);
+          String recordString = '';
+          for(dm_cpq_Product__c p : prods)
+          {
+            recordString = recordString + '"'+p.Account_Name__c+'","'+p.Opportunity_Name__c+'","'+name+'","'+p.Product_Code__c+'","'+p.Quantity__c+'","'+p.List_Price__c+'"\n';
+          }
+           finalstr = finalstr +recordString;
+         }
+         // Create the email attachment    
+         Messaging.EmailFileAttachment efa = new Messaging.EmailFileAttachment();
+         efa.setFileName(attName);
+         efa.setBody(Blob.valueOf(finalstr));
+         emailAttList.add(efa);
+       }      
+        // Sets the paramaters of the email
+         String body = 'Test';
+         email.setSubject( subject );
+         email.setToAddresses( new String[] {'revathi.mohan@nteligroup.com'} );
+         email.setPlainTextBody( body );
+         email.setFileAttachments(emailAttList);
+         // Sends the email
+         Messaging.SendEmailResult [] r =
+                Messaging.sendEmail(new Messaging.SingleEmailMessage[] {email});
+ }
+   */ 
+ 
+global void finish(Database.BatchableContext BC)
+ {//sendEmail(productToOppMap);
+ }
+}
+@isTest
+public class dm_SubscriptionBatchTest {
+
+    @testSetup
+static void setupData(){
+       
+    	//Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+    
+       //Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'pc1',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        objProduct.SBQQ__SubscriptionType__c='Renewable';
+        insert objProduct;
+    
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+    
+         // Quote Creation
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        
+        
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.DM_Quote__c = True;
+        objQuote.SBQQ__Opportunity2__c = objOpportunity.Id;
+        objQuote.Manual_Fix__c = true;
+        objQuote.SBQQ__Ordered__c =  true ;
+        objQuote.SBQQ__Account__c = objAccount.Id;
+        objQuote.DM_ErrorQuote__c = false;
+        insert objQuote;
+    
+    	//Price Dimension
+        SBQQ__Dimension__c objdim = new SBQQ__Dimension__c();
+        objdim.SBQQ__Product__c=objProduct.Id;
+        objdim.SBQQ__QuantityEditable__c= 'Inherit';
+        objdim.SBQQ__Type__c='Year';
+        objdim.SBQQ__PriceEditable__c= 'Inherit';
+        objdim.SBQQ__NonPartnerDiscountable__c='Inherit';
+        objdim.SBQQ__CostEditable__c='Inherit';
+        objdim.SBQQ__Taxable__c='Inherit';
+      	insert objdim;
+    
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        objQuoteLine.SBQQ__BillingType__c ='Advance';
+        objQuoteLine.SBQQ__Number__c= 1;
+        objQuoteLine.SBQQ__Product__c=objProduct.Id;
+        objQuoteLine.SBQQ__Quantity__c=80;
+        objQuoteLine.List_Price__c=89;
+        objQuoteLine.DM_QuoteLine__c=true;
+        objQuoteLine.DM_ErrorQL__c=false;
+        objQuoteLine.SBQQ__Dimension__c= objdim.id;
+        objQuoteLine.SBQQ__SubscriptionTerm__c=24;
+        objQuoteLine.SBQQ__SegmentIndex__c=1;
+        objQuoteLine.SBQQ__SegmentLabel__c='Test';
+        objQuoteLine.SBQQ__SegmentKey__c='aeb1234';
+        objQuoteLine.SBQQ__SubscriptionPricing__c= 'Fixed Price';
+        
+        insert objQuoteLine;
+    
+       	//Contract
+         Contract objContract = new Contract(
+            Status = 'Draft',
+            StartDate = objQuote.SBQQ__StartDate__c,
+            EndDate = objQuote.SBQQ__EndDate__c,
+            ContractTerm = 24,
+            AccountId = objQuote.SBQQ__Account__c, //objAccount.Id,
+            SBQQ__Opportunity__c = objQuote.SBQQ__Opportunity2__c, //objOpportunity.Id,
+            SBQQ__Quote__c = objQuote.Id
+        );
+    	objContract.Name = 'Test';
+         insert objContract;
+    	
+    	List<Contract> con = [Select Id,Name from Contract where Name = 'Test' limit 1];
+ 		objQuote.Contract_dm__c =  con[0].Id;
+    	update objQuote;
+    
+        //SBQQ__Subscription__C
+        SBQQ__Subscription__c objSub = TestDataUtility.createSubscription(
+            10,
+            objPriceBookEntry.Product2Id, 
+            objQuote.SBQQ__Account__c, 
+            objQuoteLine.Id,
+            1,
+            10000.00,
+            10000.00,
+            10000.00,
+            10000.00,
+            10000.00,
+            10000.00,
+            10,
+            10,
+            System.today(),
+            System.today().addYears(1).addDays(-1),
+            null
+        );
+        objSub.SBQQ__SubscriptionPricing__c= 'Fixed Price';
+        objSub.SBQQ__SubscriptionType__c='Renewable';
+        objSub.SBQQ__ProductSubscriptionType__c='Renewable';
+        objSub.SBQQ__SegmentIndex__c=1;
+        objSub.SBQQ__SegmentLabel__c='Test';
+        objSub.SBQQ__SegmentKey__c='aeb1234';
+        objSub.SBQQ__Dimension__c=objdim.Id;
+        insert objSub;
+    
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;     
+        
+}
+     @isTest 
+    static void executeTest(){
+        Test.startTest();
+        dm_SubscriptionBatch bc = new dm_SubscriptionBatch();
+        Database.executeBatch(bc);
+        Test.stopTest();
+    }
+}

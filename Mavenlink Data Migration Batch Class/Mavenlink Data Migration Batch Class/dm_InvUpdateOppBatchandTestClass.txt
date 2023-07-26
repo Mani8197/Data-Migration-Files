@@ -1,0 +1,500 @@
+//Update Invoice temp table for the records without Opportunity based on the Quote line Account,Quantity and Inv line Account,Quantity
+//Step 2: After this batch even if more records exists without Opportunity names proceed for the dm_InvUpdateOppWithDateBatch
+public class dm_InvUpdateOppBatch implements Database.Batchable<sObject>,Database.Stateful {
+    public database.querylocator start(Database.BatchableContext BC)
+{
+  String queryQL = 'Select Id,Name,SBQQ__NetPrice__c,SBQQ__Quantity__c,dm_OldOppProd_TotalPrice__c,SBQQ__Quote__r.Id,SBQQ__Quote__r.Name,SBQQ__Product__r.Name,SBQQ__StartDate__c,SBQQ__EndDate__c,SBQQ__SegmentIndex__c,'+
+     					 ' SBQQ__Number__c,DM_ErrorQL__c,SBQQ__SegmentKey__c, SBQQ__SegmentLabel__c,SBQQ__NetTotal__c,'+
+                                        ' SBQQ__AdditionalDiscountAmount__c,dm_Old_Opp_Prod_Price_PerLine__c,dm_Before_ErrFix_DiscAmnt__c,dm_TempDiscAmtErrFix__c,dm_Old_Opp_Prod_Term__c,SBQQ__ListPrice__c,SBQQ__ProrateMultiplier__c,dm_Old_Opp_Prod_Id__c,SBQQ__SubscriptionTerm__c,SBQQ__Discount__c'+
+                                        ' from SBQQ__QuoteLine__c '+
+        				 +' where SBQQ__Quote__r.dm_Quote__c = true '//+' and dm_Old_Opp_Prod_Id__c != null  '
+                    // +' and SBQQ__NetTotal__c != null  '
+                  +' and DM_QuoteLine__c = true ';
+    //Get the Inv line with out Opportunity,status limits and date filters
+    String invLineTemp = 'Select Id, Account__c,Invoice__c,Opportunity__c,Product_Name__c,Invoice_Item_Quantity__c,Product__c,ProductNameCPQ__c,Order__c,Quote__c,Invoice_Invoice_Number__c '+
+        ' from dm_Invoice_InvoiceLine__c where Invoice_Invoice_Number__c != null and Product__c != null and Subscription_Opportunity_Name__c = null and New_Dm_Invoice__c = true ';
+    
+    return Database.getQueryLocator(invLineTemp);
+}
+    public void execute(Database.BatchableContext BC,List<dm_Invoice_InvoiceLine__c> invExl)
+    {
+        List<dm_Invoice_InvoiceLine__c> forUpdate = new List<dm_Invoice_InvoiceLine__c>();
+        Map<Id,List<dm_Invoice_InvoiceLine__c>> accToInvMap = new Map<Id,List<dm_Invoice_InvoiceLine__c>>();
+        Map<String,List<SBQQ__QuoteLine__c>> accToQLMap = new Map<String,List<SBQQ__QuoteLine__c>>();
+        //Update the In Line with Product Name
+        //Then get the Product id for filter
+        for(dm_Invoice_InvoiceLine__c inv : invExl)
+        {
+            if(accToInvMap.containsKey(inv.Account__c))
+                accToInvMap.get(inv.Account__c).add(inv);
+            else accToInvMap.put(inv.Account__c,new List<dm_Invoice_InvoiceLine__c>{inv});
+        }
+         //Get the Product name and its lines under the Account
+         Map<String,Map<String,List<dm_Invoice_InvoiceLine__c>>> invProdToLine = new Map<String,Map<String,List<dm_Invoice_InvoiceLine__c>>>();
+        for(String invAccId : accToInvMap.keySet())
+        {
+            List<dm_Invoice_InvoiceLine__c> invs = accToInvMap.get(invAccId);
+            Map<String,List<dm_Invoice_InvoiceLine__c>> prodToLine = getProductToLines(invs);
+            if(invProdToLine.containsKey(invAccId))
+            {
+                //Existing
+                Map<String,List<dm_Invoice_InvoiceLine__c>> temp = invProdToLine.get(invAccId);
+                for(String innerProdId : temp.keySet())
+        		{
+                    if(prodToLine.containsKey(innerProdId))
+                    {
+                        List<dm_Invoice_InvoiceLine__c> t = temp.get(innerProdId);
+                        if(t != null)
+                    	prodToLine.get(innerProdId).addAll(t);
+                    }
+                    else prodToLine.put(innerProdId,temp.get(innerProdId));
+                }
+                
+            }
+            else invProdToLine.put(invAccId,prodToLine);
+            
+        }
+        
+        //Get the Quote Lines
+        List<SBQQ__QuoteLine__c> qls = [Select Id,Name,SBQQ__Quote__r.SBQQ__Opportunity2__r.Name,SBQQ__Quote__r.SBQQ__Account__c,SBQQ__NetPrice__c,SBQQ__Quantity__c,dm_OldOppProd_TotalPrice__c,SBQQ__Quote__r.Id,
+                                        SBQQ__Quote__r.Name,SBQQ__Product__r.Name,SBQQ__StartDate__c,SBQQ__EndDate__c,SBQQ__SegmentIndex__c,
+                                        SBQQ__Number__c,DM_ErrorQL__c,SBQQ__SegmentKey__c, SBQQ__SegmentLabel__c,SBQQ__NetTotal__c,
+                                        SBQQ__AdditionalDiscountAmount__c,dm_Old_Opp_Prod_Price_PerLine__c,dm_Before_ErrFix_DiscAmnt__c,
+                                        dm_TempDiscAmtErrFix__c,dm_Old_Opp_Prod_Term__c,SBQQ__ListPrice__c,SBQQ__ProrateMultiplier__c,
+                                        dm_Old_Opp_Prod_Id__c,SBQQ__SubscriptionTerm__c,SBQQ__Discount__c
+                                         from SBQQ__QuoteLine__c 
+        				 			    where SBQQ__Quote__r.dm_Quote__c = true and SBQQ__Quote__r.SBQQ__Primary__c = true
+                                        and SBQQ__NetTotal__c != null and SBQQ__Quote__r.SBQQ__Account__c in :accToInvMap.keySet()];
+        
+        //Get the Account with QL
+        for(SBQQ__QuoteLine__c ql : qls)
+        {
+            if(accToQLMap.containsKey(ql.SBQQ__Quote__r.SBQQ__Account__c))
+                accToQLMap.get(ql.SBQQ__Quote__r.SBQQ__Account__c).add(ql);
+            else accToQLMap.put(ql.SBQQ__Quote__r.SBQQ__Account__c,new List<SBQQ__QuoteLine__c>{ql});
+        }
+        //Get the Product name and its lines under the Account
+         Map<String,Map<String,List<SBQQ__QuoteLine__c>>> qlProdToLine = new Map<String,Map<String,List<SBQQ__QuoteLine__c>>>();
+        for(String invAccId : accToQLMap.keySet())
+        {
+            List<SBQQ__QuoteLine__c> invs = accToQLMap.get(invAccId);
+            Map<String,List<SBQQ__QuoteLine__c>> prodToLine = getProductToQLLines(invs);
+            System.debug(prodToLine);
+            System.debug(qlProdToLine);
+            if(qlProdToLine.containsKey(invAccId))
+            {
+                //Existing
+                Map<String,List<SBQQ__QuoteLine__c>> temp = qlProdToLine.get(invAccId);
+                for(String innerProdId : temp.keySet())
+        		{
+                    if(prodToLine.containsKey(innerProdId))
+                    {
+                        List<SBQQ__QuoteLine__c> t = temp.get(innerProdId);
+                        if(t != null)
+                    	prodToLine.get(innerProdId).addAll(t);
+                    }
+                    else prodToLine.put(innerProdId,temp.get(innerProdId));
+                }
+                
+            }
+            else qlProdToLine.put(invAccId,prodToLine);
+            
+        }
+        System.debug('invProdToLine Count:'+invProdToLine.size());
+        System.debug('qlProdToLine Count:'+qlProdToLine.size());
+        //Map Inv and QL
+        for(String accId : invProdToLine.keySet())
+        {
+            //If Acc id matches
+            if(qlProdToLine.containsKey(accId))
+            {
+                System.debug('Acc Match:'+accId);
+                //Get the QL Lines
+                Map<String,List<SBQQ__QuoteLine__c>> qlProdToLineTemp = qlProdToLine.get(accId);
+                Map<String,List<dm_Invoice_InvoiceLine__c>> invProdTemp = invProdToLine.get(accId);
+                for(String qlProdId : qlProdToLineTemp.keySet())
+                {
+                    System.debug('Prod Id Out:'+qlProdId);
+                    //If Invoices Lines has Prod with Quantity
+                    if(invProdTemp.containsKey(qlProdId))
+                    {
+                        System.debug('ProdId Match:'+qlProdId);
+                        //Get all the Inv lines for Opp update
+                        List<dm_Invoice_InvoiceLine__c> invT = invProdTemp.get(qlProdId);
+                        for(dm_Invoice_InvoiceLine__c i : invT){
+                        i.Subscription_Opportunity_Name__c = qlProdToLineTemp.get(qlProdId)[0].SBQQ__Quote__r.SBQQ__Opportunity2__r.Name;
+                            forUpdate.add(i);}
+                        System.debug('invT Count:'+invT.size());
+                    }
+                }
+                
+            }
+           
+        }
+        if(forUpdate.size()>0)
+            Database.update(forUpdate,false);
+    }
+     public static Map<String,List<SBQQ__QuoteLine__c>> getProductToQLLines(List<SBQQ__QuoteLine__c> invs)
+    {
+        Map<String,List<SBQQ__QuoteLine__c>> prodToLines = new Map<String,List<SBQQ__QuoteLine__c>>();
+        for(SBQQ__QuoteLine__c inv : invs)
+        {
+            System.debug('Quantity:'+Integer.valueOf(inv.SBQQ__Quantity__c));
+            if(prodToLines.containsKey(inv.SBQQ__Product__c+'--'+Integer.valueOf(inv.SBQQ__Quantity__c)))
+                prodToLines.get(inv.SBQQ__Product__c+'--'+Integer.valueOf(inv.SBQQ__Quantity__c)).add(inv);
+            else prodToLines.put(inv.SBQQ__Product__c+'--'+Integer.valueOf(inv.SBQQ__Quantity__c),new List<SBQQ__QuoteLine__c>{inv});
+            
+        }
+        return prodToLines;
+    }
+    public static Map<String,List<dm_Invoice_InvoiceLine__c>> getProductToLines(List<dm_Invoice_InvoiceLine__c> invs)
+    {
+        Map<String,List<dm_Invoice_InvoiceLine__c>> prodToLines = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+        for(dm_Invoice_InvoiceLine__c inv : invs)
+        {
+            if(prodToLines.containsKey(inv.Product__c+'--'+inv.Invoice_Item_Quantity__c))
+                prodToLines.get(inv.Product__c+'--'+inv.Invoice_Item_Quantity__c).add(inv);
+            else prodToLines.put(inv.Product__c+'--'+inv.Invoice_Item_Quantity__c,new List<dm_Invoice_InvoiceLine__c>{inv});
+            
+        }
+        return prodToLines;
+    }
+    public void finish(Database.BatchableContext BC)
+ {
+ }
+
+}
+@isTest
+public class dm_InvUpdateOppBatchTest {
+@isTest
+    static void execute1(){
+        //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Product--1'
+        );
+        insert objAccount;
+        //Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'pc1',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null
+        );
+        insert objProduct;
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+        
+        // Quote Creation     
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        );
+        
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.Manual_Fix__c= True;
+        objQuote.DM_Quote__c = true;
+        objQuote.SBQQ__Primary__c = true;
+        
+        insert objQuote;
+        
+         // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        objQuoteLine.dm_OldOppProd_TotalPrice__c = 1000;
+        objQuoteLine.SBQQ__SegmentIndex__c = 1;
+        objQuoteLine.SBQQ__Number__c = 1;
+        objQuoteLine.DM_ErrorQL__c = true;
+        objQuoteLine.SBQQ__SegmentKey__c = 'Year 1';
+        objQuoteLine.SBQQ__SegmentLabel__c = 'Year 1';
+        objQuoteLine.SBQQ__AdditionalDiscountAmount__c = 0;
+        objQuoteLine.dm_Old_Opp_Prod_Price_PerLine__c = 0;
+        objQuoteLine.dm_Before_ErrFix_DiscAmnt__c = 0;
+        objQuoteLine.dm_TempDiscAmtErrFix__c = 0;
+        objQuoteLine.dm_Old_Opp_Prod_Term__c = 24;
+        objQuoteLine.SBQQ__ListPrice__c = 123;
+        objQuoteLine.SBQQ__ProrateMultiplier__c = 12;
+        objQuoteLine.dm_Old_Opp_Prod_Id__c =objProduct.Id;
+        objQuoteLine.SBQQ__Discount__c = 0;
+        objQuoteLine.DM_QuoteLine__c = true;
+        
+        
+        insert objQuoteLine;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+        
+        // blng__Invoice__c creation
+        blng__Invoice__c objBlngInvoice = TestDataUtility.createBlngInvoice(
+            objAccount.Id,
+            objOrder.Id
+        );
+        
+        objBlngInvoice.Invoice_Admin_Status__c = 'Active';
+        objBlngInvoice.Product_Category__c = 'Licenses';
+        objBlngInvoice.Custom_Invoice_Date__c = Date.today().addDays(-1);
+        objBlngInvoice.blng__InvoiceDate__c = Date.today().addDays(-1);
+        objBlngInvoice.Product_Categories__c = 'Licenses';
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Zuora_Invoice_Number__c = 'aEf7800000001s0';
+        objBlngInvoice.DM_Invoice__c = true;
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Opportunity__c = objOpportunity.id;
+        
+        
+        insert objBlngInvoice;
+        
+        //dm_Invoice_InvoiceLine__c Creation
+        dm_Invoice_InvoiceLine__c ObjdmInvoice = new dm_Invoice_InvoiceLine__c();
+        ObjdmInvoice.Opportunity__c = objOpportunity.id;
+        ObjdmInvoice.Invoice_Invoice_Number__c= 'aEf7800000001s0';
+        ObjdmInvoice.Order__c = objOrder.id;
+        ObjdmInvoice.Quote__c = objQuote.id;
+        ObjdmInvoice.Invoice__c = objBlngInvoice.Id;
+        ObjdmInvoice.Product_Name__c = objProduct.Name;
+        ObjdmInvoice.Product__c = objProduct.Id;
+        ObjdmInvoice.ProductNameCPQ__c = objProduct.Name;
+        ObjdmInvoice.InvoiceMain__c = true; 
+        ObjdmInvoice.Account__c = objAccount.Id;
+        ObjdmInvoice.Invoice_Item_Quantity__c = 1;
+        ObjdmInvoice.Subscription_Opportunity_Name__c = null;
+        ObjdmInvoice.New_Dm_Invoice__c = true;
+        
+        insert ObjdmInvoice;
+         
+         List<dm_Invoice_InvoiceLine__c> invs = new List<dm_Invoice_InvoiceLine__c>();
+        invs.add(ObjdmInvoice);
+        Map<String,List<dm_Invoice_InvoiceLine__c>> prodToLines = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+		prodToLines.put(objProduct.Id,invs);
+        
+        Map<String,Map<String,List<dm_Invoice_InvoiceLine__c>>> invProdToLine = new Map<String,Map<String,List<dm_Invoice_InvoiceLine__c>>>();
+		invProdToLine.put(objAccount.Id,prodToLines);
+		
+		Test.startTest();
+        dm_InvUpdateOppBatch bc = new dm_InvUpdateOppBatch();
+        Id batchId = Database.executeBatch(bc);
+        Test.stopTest();
+        
+}
+@isTest
+    static void execute2(){
+        //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        //Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'pc1',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null
+        );
+        insert objProduct;
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+        
+        // Quote Creation     
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        );
+        
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.Manual_Fix__c= True;
+        objQuote.DM_Quote__c = true;
+        objQuote.SBQQ__Primary__c = true;
+        
+        insert objQuote;
+        
+         // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        objQuoteLine.dm_OldOppProd_TotalPrice__c = 1000;
+        objQuoteLine.SBQQ__SegmentIndex__c = 1;
+        objQuoteLine.SBQQ__Number__c = 1;
+        objQuoteLine.DM_ErrorQL__c = true;
+        objQuoteLine.SBQQ__SegmentKey__c = 'Year 1';
+        objQuoteLine.SBQQ__SegmentLabel__c = 'Year 1';
+        objQuoteLine.SBQQ__AdditionalDiscountAmount__c = 0;
+        objQuoteLine.dm_Old_Opp_Prod_Price_PerLine__c = 0;
+        objQuoteLine.dm_Before_ErrFix_DiscAmnt__c = 0;
+        objQuoteLine.dm_TempDiscAmtErrFix__c = 0;
+        objQuoteLine.dm_Old_Opp_Prod_Term__c = 24;
+        objQuoteLine.SBQQ__ListPrice__c = 123;
+        objQuoteLine.SBQQ__ProrateMultiplier__c = 12;
+        objQuoteLine.dm_Old_Opp_Prod_Id__c =objProduct.Id;
+        objQuoteLine.SBQQ__Discount__c = 0;
+        objQuoteLine.DM_QuoteLine__c = true;
+        
+        
+        insert objQuoteLine;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+        
+        // blng__Invoice__c creation
+        blng__Invoice__c objBlngInvoice = TestDataUtility.createBlngInvoice(
+            objAccount.Id,
+            objOrder.Id
+        );
+        
+        objBlngInvoice.Invoice_Admin_Status__c = 'Active';
+        objBlngInvoice.Product_Category__c = 'Licenses';
+        objBlngInvoice.Custom_Invoice_Date__c = Date.today().addDays(-1);
+        objBlngInvoice.blng__InvoiceDate__c = Date.today().addDays(-1);
+        objBlngInvoice.Product_Categories__c = 'Licenses';
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Zuora_Invoice_Number__c = 'aEf7800000001s0';
+        objBlngInvoice.DM_Invoice__c = true;
+        objBlngInvoice.Opportunity__c = objOpportunity.id;
+        
+        
+        insert objBlngInvoice;
+        
+        //dm_Invoice_InvoiceLine__c Creation
+        dm_Invoice_InvoiceLine__c ObjdmInvoice = new dm_Invoice_InvoiceLine__c();
+        ObjdmInvoice.Opportunity__c = objOpportunity.id;
+        ObjdmInvoice.Invoice_Invoice_Number__c= objBlngInvoice.Id;
+        ObjdmInvoice.Order__c = objOrder.id;
+        ObjdmInvoice.Quote__c = objQuote.id ;
+        ObjdmInvoice.Invoice__c = objBlngInvoice.Id;
+        ObjdmInvoice.Product_Name__c = objProduct.Name;
+        ObjdmInvoice.Product__c = objProduct.Id;
+        ObjdmInvoice.ProductNameCPQ__c = objProduct.Name;
+        ObjdmInvoice.InvoiceMain__c = true; 
+        ObjdmInvoice.Account__c = objAccount.Id;
+        ObjdmInvoice.Invoice_Item_Quantity__c = 1;
+        ObjdmInvoice.Subscription_Opportunity_Name__c = null;
+        ObjdmInvoice.New_Dm_Invoice__c = true;
+        
+        insert ObjdmInvoice;
+        
+        
+        List<dm_Invoice_InvoiceLine__c> invs = new List<dm_Invoice_InvoiceLine__c>();
+        invs.add(ObjdmInvoice);
+        Map<String,List<dm_Invoice_InvoiceLine__c>> prodToLines = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+		prodToLines.put(objProduct.Id,invs);
+        
+        Map<String,Map<String,List<dm_Invoice_InvoiceLine__c>>> invProdToLine = new Map<String,Map<String,List<dm_Invoice_InvoiceLine__c>>>();
+		invProdToLine.put(objAccount.Id,prodToLines);
+		
+		
+        
+		Test.startTest();
+        dm_InvUpdateOppBatch bc = new dm_InvUpdateOppBatch();
+        
+        Id batchId = Database.executeBatch(bc);
+        Test.stopTest();
+                
+}
+}

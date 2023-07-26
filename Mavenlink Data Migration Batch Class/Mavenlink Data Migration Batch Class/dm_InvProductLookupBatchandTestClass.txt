@@ -1,0 +1,651 @@
+//Invoices - Product Look up 
+public class dm_InvProductLookupBatch implements Database.Batchable<sObject>,Database.Stateful {
+public static final String LICENSES_PRODUCT_CATEGORY = 'Licenses'; 
+   public database.querylocator start(Database.BatchableContext BC)
+  {
+    //String queryInvExcel = 'Select Id, Invoice__c,Opportunity__c,Product_Name__c,Product__c,ProductNameCPQ__c,Order__c,Quote__c,Invoice_Invoice_Number__c from dm_Invoice_InvoiceLine__c where Invoice_Invoice_Number__c != null and Opportunity__c != null and Quote__c != null';// and Order__c = null ';
+    String queryInvExcel = 'Select Id, Invoice__c,Opportunity__c,Product_Name__c,Product__c,ProductNameCPQ__c,Order__c,Quote__c,Invoice_Invoice_Number__c from dm_Invoice_InvoiceLine__c where Invoice_Invoice_Number__c != null and '
+        +' Product_Name__c != null and Product__c = null and dm_filtered_records__c = True'; //New_Dm_Invoice__c = true and Order__c = null ';
+     return Database.getQueryLocator(queryInvExcel);
+  }
+  public void execute(Database.BatchableContext BC,List<dm_Invoice_InvoiceLine__c> invsExl)
+	{
+      updateProductLookupCPQProdForInvLinesExl(invsExl);//Line items CPQ Prod Name,Prod Id update
+    }
+    
+    //Prod Name CPQ - Invoice lines preparation
+  public static void updateProductLookupCPQProdForInvLinesExl(List<dm_Invoice_InvoiceLine__c > invList)
+ {
+     Map<String,List<dm_Invoice_InvoiceLine__c>> productNameTodmInvMap = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+     Map<String,dm_Invoice_InvoiceLine__c> dmInvMap = new Map<String,dm_Invoice_InvoiceLine__c>(invList);
+     List<Product2> orgProducts = [Select Id,Name,PC_1__c from Product2 where Name like '%CPQ'];
+     Set<String> oppNames = new Set<String>();
+     Set<String> productsName = new Set<String>();
+     Map<String,Product2> orgProductsMap = new Map<String,Product2>();//(orgProducts);
+     //Get the Product Code with Name in a set
+     for(Product2 p : orgProducts)  
+     {
+         productsName.add(p.Name);
+         System.debug('Product Name:'+p.Name);
+         orgProductsMap.put(p.Name,p);
+     }
+     
+	 List<dm_Invoice_InvoiceLine__c> forUpdate = new List<dm_Invoice_InvoiceLine__c >();
+	for(dm_Invoice_InvoiceLine__c  inv : invList)
+	{
+         System.debug('Name:-CPQ:'+inv.PRODUCT_NAME__c+'-CPQ');
+         System.debug('Name:-CPQ'+productsName.contains(inv.PRODUCT_NAME__c+'-CPQ'));
+         System.debug('Name: -CPQ'+productsName.contains(inv.PRODUCT_NAME__c+ ' -CPQ'));
+         System.debug('Name: - CPQ'+productsName.contains(inv.PRODUCT_NAME__c+' - CPQ'));
+         System.debug('Name: CPQ'+productsName.contains(inv.PRODUCT_NAME__c+' CPQ'));
+        //Check for the Product name in CPQ
+         //This logic is for the different names in Opp Prod excel and Block Price Product in org
+        String  prodNameWithoutCurlyBraces = inv.PRODUCT_NAME__c.contains('(') ? inv.PRODUCT_NAME__c.substringBeforeLast('(').trim() : inv.PRODUCT_NAME__c;
+        //System.debug('name:'+name);
+        System.debug('prodNameWithoutCurlyBraces:'+prodNameWithoutCurlyBraces);
+        
+        if(productsName.contains(prodNameWithoutCurlyBraces+'-CPQ') || productsName.contains(prodNameWithoutCurlyBraces+ ' -CPQ')
+            || productsName.contains(prodNameWithoutCurlyBraces+' - CPQ') || productsName.contains(prodNameWithoutCurlyBraces+' CPQ'))
+            {
+                String prodNameWithCPQ = '';
+                if(productsName.contains(prodNameWithoutCurlyBraces+'-CPQ'))
+                    prodNameWithCPQ = prodNameWithoutCurlyBraces+'-CPQ';
+                 else if(productsName.contains(prodNameWithoutCurlyBraces+ ' -CPQ'))
+                     prodNameWithCPQ = prodNameWithoutCurlyBraces+ ' -CPQ';
+                 else if(productsName.contains(prodNameWithoutCurlyBraces+' - CPQ'))
+                     prodNameWithCPQ = prodNameWithoutCurlyBraces+' - CPQ';
+                 else if (productsName.contains(prodNameWithoutCurlyBraces+' CPQ'))
+                     prodNameWithCPQ = prodNameWithoutCurlyBraces+' CPQ';
+                System.debug('prodNameWithCPQ:IN:'+prodNameWithCPQ);
+          if(productNameTodmInvMap.containsKey(prodNameWithCPQ))
+           productNameTodmInvMap.get(prodNameWithCPQ).add(inv);
+          else productNameTodmInvMap.put(prodNameWithCPQ,new List<dm_Invoice_InvoiceLine__c>{inv});
+           }
+        /*
+         if(productsName.contains(inv.PRODUCT_NAME__c+'-CPQ') || productsName.contains(inv.PRODUCT_NAME__c+ ' -CPQ')
+            || productsName.contains(inv.PRODUCT_NAME__c+' - CPQ') || productsName.contains(inv.PRODUCT_NAME__c+' CPQ'))
+            {
+                String prodNameWithCPQ = '';
+                if(productsName.contains(inv.PRODUCT_NAME__c+'-CPQ'))
+                    prodNameWithCPQ = inv.PRODUCT_NAME__c+'-CPQ';
+                 else if(productsName.contains(inv.PRODUCT_NAME__c+ ' -CPQ'))
+                     prodNameWithCPQ = inv.PRODUCT_NAME__c+ ' -CPQ';
+                 else if(productsName.contains(inv.PRODUCT_NAME__c+' - CPQ'))
+                     prodNameWithCPQ = inv.PRODUCT_NAME__c+' - CPQ';
+                 else if (productsName.contains(inv.PRODUCT_NAME__c+' CPQ'))
+                     prodNameWithCPQ = inv.PRODUCT_NAME__c+' CPQ';
+                
+          if(productNameTodmInvMap.containsKey(prodNameWithCPQ))
+           productNameTodmInvMap.get(prodNameWithCPQ).add(inv);
+          else productNameTodmInvMap.put(prodNameWithCPQ,new List<dm_Invoice_InvoiceLine__c >{inv});
+           } */
+    }
+	for(String dmProdName :productNameTodmInvMap.keySet())
+    {
+        if(orgProductsMap.containsKey(dmProdName))
+        {
+            List<dm_Invoice_InvoiceLine__c> dmInvTemp = productNameTodmInvMap.get(dmProdName);
+            for(dm_Invoice_InvoiceLine__c p : dmInvTemp)
+            {
+                if(p.Product__c == null && p.ProductNameCPQ__c == null ){
+                p.Product__c = (orgProductsMap.get(dmProdName)).Id;
+                p.ProductNameCPQ__c = dmProdName;//Name with CPQ
+                forUpdate.add(p);
+                }
+            }
+        }
+    }
+	System.debug('Count:'+forUpdate.size());
+	Database.update(forUpdate);
+ }
+    // The batch job finishes
+  public void finish(Database.BatchableContext bc){ }
+
+}
+@isTest
+public class dm_InvProductLookupBatchTest {
+ @isTest
+   static void execute1(){
+       	//Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        
+    	//Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        
+    	// Product Creation
+    	List<Product2> ProductTypes = new List<Product2>();
+        Product2 objProduct = TestDataUtility.createProduct(
+            'TestProduct-CPQ',
+            true,
+            'Quantity',
+            'Licenses',
+            'pc1',
+            'pc2',
+            'pc3',
+            'Recurring',
+            null,
+            'Recurring',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null
+        );
+       objProduct.SBQQ__ChargeType__c = 'Recurring';
+       objProduct.Product_Category__c = 'Licenses';
+       insert objProduct;
+       
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+       	
+       	// Quote Creation     
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        );
+        
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.Manual_Fix__c= True;
+        insert objQuote;
+       
+       // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+       
+       // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+		
+    	// blng__Invoice__c creation
+        blng__Invoice__c objBlngInvoice = TestDataUtility.createBlngInvoice(
+            objAccount.Id,
+            objOrder.Id
+        );
+        
+        objBlngInvoice.Invoice_Admin_Status__c = 'Active';
+        objBlngInvoice.Product_Category__c = 'Licenses';
+        objBlngInvoice.Custom_Invoice_Date__c = Date.today().addDays(-1);
+        objBlngInvoice.blng__InvoiceDate__c = Date.today().addDays(-1);
+        objBlngInvoice.Product_Categories__c = 'Licenses';
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Zuora_Invoice_Number__c = '12345';
+        objBlngInvoice.DM_Invoice__c = true;
+        objBlngInvoice.Invoice_Number__c = 0;
+        
+        insert objBlngInvoice;
+		
+        //dm_Invoice_InvoiceLine__c Creation
+
+        dm_Invoice_InvoiceLine__c ObjdmInvoice = new dm_Invoice_InvoiceLine__c();
+        ObjdmInvoice.Opportunity__c = objOpportunity.id;
+        ObjdmInvoice.Invoice_Invoice_Number__c= 'aEf7800000001s0';
+        ObjdmInvoice.Order__c = objOrder.id;
+    	ObjdmInvoice.Quote__c = objQuote.id;
+        ObjdmInvoice.Invoice__c = objBlngInvoice.Id;
+        ObjdmInvoice.Product_Name__c = 'TestProduct';
+        ObjdmInvoice.Product__c = null;
+        ObjdmInvoice.ProductNameCPQ__c = 'TestProduct';
+        ObjdmInvoice.New_Dm_Invoice__c = true;
+		insert objdmInvoice;
+
+
+        Test.startTest();
+        dm_InvProductLookupBatch bc = new dm_InvProductLookupBatch();
+        Id batchId = Database.executeBatch(bc);
+        Test.stopTest();
+
+}
+    @isTest
+   static void execute2(){
+       	//Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        
+    	//Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        
+    	// Product Creation
+    	List<Product2> ProductTypes = new List<Product2>();
+        Product2 objProduct = TestDataUtility.createProduct(
+            'TestProduct -CPQ',
+            true,
+            'Quantity',
+            'Licenses',
+            'pc1',
+            'pc2',
+            'pc3',
+            'Recurring',
+            null,
+            'Recurring',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null
+        );
+       objProduct.SBQQ__ChargeType__c = 'Recurring';
+       objProduct.Product_Category__c = 'Licenses';
+       insert objProduct;
+       
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+       	
+       	// Quote Creation     
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        );
+        
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.Manual_Fix__c= True;
+        insert objQuote;
+       
+       // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+       
+       // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+		
+    	// blng__Invoice__c creation
+        blng__Invoice__c objBlngInvoice = TestDataUtility.createBlngInvoice(
+            objAccount.Id,
+            objOrder.Id
+        );
+        
+        objBlngInvoice.Invoice_Admin_Status__c = 'Active';
+        objBlngInvoice.Product_Category__c = 'Licenses';
+        objBlngInvoice.Custom_Invoice_Date__c = Date.today().addDays(-1);
+        objBlngInvoice.blng__InvoiceDate__c = Date.today().addDays(-1);
+        objBlngInvoice.Product_Categories__c = 'Licenses';
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Zuora_Invoice_Number__c = '12345';
+        objBlngInvoice.DM_Invoice__c = true;
+        objBlngInvoice.Invoice_Number__c = 0;
+        
+        insert objBlngInvoice;
+		
+        //dm_Invoice_InvoiceLine__c Creation
+
+        dm_Invoice_InvoiceLine__c ObjdmInvoice = new dm_Invoice_InvoiceLine__c();
+        ObjdmInvoice.Opportunity__c = objOpportunity.id;
+        ObjdmInvoice.Invoice_Invoice_Number__c= 'aEf7800000001s0';
+        ObjdmInvoice.Order__c = objOrder.id;
+    	ObjdmInvoice.Quote__c = objQuote.id;
+        ObjdmInvoice.Invoice__c = objBlngInvoice.Id;
+        ObjdmInvoice.Product_Name__c = 'TestProduct';
+        ObjdmInvoice.Product__c = Null;
+      ObjdmInvoice.New_Dm_Invoice__c = true;
+        ObjdmInvoice.ProductNameCPQ__c = 'TestProduct';
+		insert objdmInvoice;
+
+
+        Test.startTest();
+        dm_InvProductLookupBatch bc = new dm_InvProductLookupBatch();
+        Id batchId = Database.executeBatch(bc);
+        Test.stopTest();
+
+}
+     @isTest
+   static void execute3(){
+       	//Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        
+    	//Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        
+    	// Product Creation
+    	List<Product2> ProductTypes = new List<Product2>();
+        Product2 objProduct = TestDataUtility.createProduct(
+            'TestProduct - CPQ',
+            true,
+            'Quantity',
+            'Licenses',
+            'pc1',
+            'pc2',
+            'pc3',
+            'Recurring',
+            null,
+            'Recurring',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null
+        );
+       objProduct.SBQQ__ChargeType__c = 'Recurring';
+       objProduct.Product_Category__c = 'Licenses';
+       insert objProduct;
+       
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+       	
+       	// Quote Creation     
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        );
+        
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.Manual_Fix__c= True;
+        insert objQuote;
+       
+       // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+       
+       // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+		
+    	// blng__Invoice__c creation
+        blng__Invoice__c objBlngInvoice = TestDataUtility.createBlngInvoice(
+            objAccount.Id,
+            objOrder.Id
+        );
+        
+        objBlngInvoice.Invoice_Admin_Status__c = 'Active';
+        objBlngInvoice.Product_Category__c = 'Licenses';
+        objBlngInvoice.Custom_Invoice_Date__c = Date.today().addDays(-1);
+        objBlngInvoice.blng__InvoiceDate__c = Date.today().addDays(-1);
+        objBlngInvoice.Product_Categories__c = 'Licenses';
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Zuora_Invoice_Number__c = '12345';
+        objBlngInvoice.DM_Invoice__c = true;
+        objBlngInvoice.Invoice_Number__c = 0;
+        
+        insert objBlngInvoice;
+		
+        //dm_Invoice_InvoiceLine__c Creation
+
+        dm_Invoice_InvoiceLine__c ObjdmInvoice = new dm_Invoice_InvoiceLine__c();
+        ObjdmInvoice.Opportunity__c = objOpportunity.id;
+        ObjdmInvoice.Invoice_Invoice_Number__c= 'aEf7800000001s0';
+        ObjdmInvoice.Order__c = objOrder.id;
+    	ObjdmInvoice.Quote__c = objQuote.id;
+        ObjdmInvoice.Invoice__c = objBlngInvoice.Id;
+        ObjdmInvoice.Product_Name__c = 'TestProduct';
+        ObjdmInvoice.Product__c = null;
+       ObjdmInvoice.New_Dm_Invoice__c = true;
+        ObjdmInvoice.ProductNameCPQ__c = 'TestProduct';
+		insert objdmInvoice;
+
+
+        Test.startTest();
+        dm_InvProductLookupBatch bc = new dm_InvProductLookupBatch();
+        Id batchId = Database.executeBatch(bc);
+        Test.stopTest();
+
+}
+      @isTest
+   static void execute4(){
+       	//Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        
+    	//Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        
+    	// Product Creation
+    	List<Product2> ProductTypes = new List<Product2>();
+        Product2 objProduct = TestDataUtility.createProduct(
+            'TestProduct CPQ',
+            true,
+            'Quantity',
+            'Licenses',
+            'pc1',
+            'pc2',
+            'pc3',
+            'Recurring',
+            null,
+            'Recurring',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null
+        );
+       objProduct.SBQQ__ChargeType__c = 'Recurring';
+       objProduct.Product_Category__c = 'Licenses';
+       insert objProduct;
+       
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+       	
+       	// Quote Creation     
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        );
+        
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.Manual_Fix__c= True;
+        insert objQuote;
+       
+       // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+       
+       // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+		
+    	// blng__Invoice__c creation
+        blng__Invoice__c objBlngInvoice = TestDataUtility.createBlngInvoice(
+            objAccount.Id,
+            objOrder.Id
+        );
+        
+        objBlngInvoice.Invoice_Admin_Status__c = 'Active';
+        objBlngInvoice.Product_Category__c = 'Licenses';
+        objBlngInvoice.Custom_Invoice_Date__c = Date.today().addDays(-1);
+        objBlngInvoice.blng__InvoiceDate__c = Date.today().addDays(-1);
+        objBlngInvoice.Product_Categories__c = 'Licenses';
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Zuora_Invoice_Number__c = '12345';
+        objBlngInvoice.DM_Invoice__c = true;
+        objBlngInvoice.Invoice_Number__c = 0;
+        
+        insert objBlngInvoice;
+		
+        //dm_Invoice_InvoiceLine__c Creation
+
+        dm_Invoice_InvoiceLine__c ObjdmInvoice = new dm_Invoice_InvoiceLine__c();
+        ObjdmInvoice.Opportunity__c = objOpportunity.id;
+        ObjdmInvoice.Invoice_Invoice_Number__c= 'aEf7800000001s0';
+        ObjdmInvoice.Order__c = objOrder.id;
+    	ObjdmInvoice.Quote__c = objQuote.id;
+        ObjdmInvoice.Invoice__c = objBlngInvoice.Id;
+        ObjdmInvoice.Product_Name__c = 'TestProduct';
+        ObjdmInvoice.Product__c = null;
+        ObjdmInvoice.ProductNameCPQ__c = 'TestProduct';
+       ObjdmInvoice.New_Dm_Invoice__c = true;
+		insert objdmInvoice;
+
+
+        Test.startTest();
+        dm_InvProductLookupBatch bc = new dm_InvProductLookupBatch();
+        Id batchId = Database.executeBatch(bc);
+        Test.stopTest();
+
+}
+}

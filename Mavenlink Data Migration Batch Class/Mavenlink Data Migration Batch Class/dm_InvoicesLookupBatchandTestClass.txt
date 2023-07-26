@@ -1,0 +1,261 @@
+//Lookup update - Account,Opportunity,Quote from Quote -------TODO - Manual Fix flag remove
+public class dm_InvoicesLookupBatch implements Database.Batchable<sObject>,Database.Stateful {
+public static final String LICENSES_PRODUCT_CATEGORY = 'Licenses'; 
+public database.querylocator start(Database.BatchableContext BC)
+{
+    
+     String queryCPQQuote = 'Select Id,Name,SBQQ__BillingFrequency__c,SBQQ__Opportunity2__c,SBQQ__Opportunity2__r.Name,SBQQ__Account__c,'
+        +'SBQQ__NetAmount__c ,SBQQ__SubscriptionTerm__c,SBQQ__StartDate__c,SBQQ__EndDate__c  from SBQQ__Quote__c where '
+        +' DM_Quote__c = true  and SBQQ__Ordered__c = true AND Manual_Fix__c = true';//AND DM_ErrorQuote__c = true';
+    /*String queryInvExcel = 'Select Id, Invoice__c,Opportunity__c,Product_Name__c,Product__c,ProductNameCPQ__c,Order__c,Quote__c,Invoice_Invoice_Number__c from dm_Invoice_InvoiceLine__c where Invoice_Invoice_Number__c != null and Opportunity__c != null and Quote__c != null';// and Order__c = null ';
+    String queryPaymentExcel = 'Select Id,Invoice__c,Account__c,Account_CRM_Account_ID__c,Zuora_Invoice_Number__c from dm_Zuora_Payment__c where Account_CRM_Account_ID__c != null and Account__c != null and Zuora_Invoice_Number__c != null ';//and Invoice__c = null';//Account__c = null';
+    //For Payment Allocation
+    String queryBlngInvLines = 'Select Id,blng__Invoice__c,blng__Subtotal__c,blng__Invoice__r.Zuora_Invoice_Number__c from blng__InvoiceLine__c where DM_InvLine__c = true and '
+                                + ' blng__Invoice__r.DM_Invoice__c = true and blng__Invoice__r.Zuora_Invoice_Number__c != null';
+    */
+	return Database.getQueryLocator(queryCPQQuote);
+}
+public void execute(Database.BatchableContext BC,List<SBQQ__Quote__c> quotes)
+{
+    updateInvoiceExcelLookups(quotes);
+}
+/*    
+//InvExcel Order 
+public static void updateInvoiceExcelOrderLookUp(List<dm_Invoice_InvoiceLine__c> invsExl)
+{
+      List<dm_Invoice_InvoiceLine__c> forUpdate = new List<dm_Invoice_InvoiceLine__c>();
+      Map<String,dm_Invoice_InvoiceLine__c> quoteToInvExl = new Map<String,dm_Invoice_InvoiceLine__c>();
+      Map<String,Order> quoteToOrder = new Map<String,Order>();
+      for(dm_Invoice_InvoiceLine__c invObj : invsExl)
+      {
+          if(! quoteToInvExl.containsKey(invObj.Quote__c))
+              quoteToInvExl.put(invObj.Quote__c,invObj);
+      }
+      List<Order> orders = [Select Id,Product_Category_Name__c,SBQQ__Quote__c,SBQQ__Quote__r.Customer_Billing_Email_Id_s__c from Order where 
+                            SBQQ__Quote__r.DM_ErrorQuote__c = false and SBQQ__Quote__r.DM_Quote__c = true and 
+                            Product_Category_Name__c = 'Licenses' and SBQQ__Quote__c in :quoteToInvExl.keySet() ];
+      //Get the Quote to Order Map
+      for(Order orderObj : orders)
+      {
+          if(! quoteToOrder.containsKey(orderObj.SBQQ__Quote__c))
+              quoteToOrder.put(orderObj.SBQQ__Quote__c,orderObj);
+      }
+      //Map the Order to InvExcel using the Quote Id
+      for(dm_Invoice_InvoiceLine__c invObj : invsExl)
+      {
+          if(quoteToOrder.containsKey(invObj.Quote__c))
+          {
+              invObj.Order__c = quoteToOrder.get(invObj.Quote__c).Id;
+              invObj.CustomerBillingEmailId__c = quoteToOrder.get(invObj.Quote__c).SBQQ__Quote__r.Customer_Billing_Email_Id_s__c;
+              forUpdate.add(invObj);
+          }
+      }
+      if(forUpdate.size()>0)
+          Database.Update(forUpdate);
+  }
+*/
+//Invoice Invoice Lines - Lookup Opp,Quote,Account
+public static void updateInvoiceExcelLookups(List<SBQQ__Quote__c> quotes)
+{
+    //For Update
+    List<dm_Invoice_InvoiceLine__c> forUpdate = new  List<dm_Invoice_InvoiceLine__c>();
+    Map<String,SBQQ__Quote__c> oppNameToQuoteMap = new Map<String,SBQQ__Quote__c>();
+    Map<String,List<dm_Invoice_InvoiceLine__c>> oppNameToInvExcel = new Map<String,List<dm_Invoice_InvoiceLine__c>>();
+    //Get the Quote based on the Opportunity Name
+    for(SBQQ__Quote__c q : quotes)
+    {
+        if(!oppNameToQuoteMap.containsKey(q.SBQQ__Opportunity2__r.Name))
+            oppNameToQuoteMap.put(q.SBQQ__Opportunity2__r.Name,q);
+    }
+    //Map the Opportunity Name with Invoice and Lines Excel
+    List<dm_Invoice_InvoiceLine__c> invoiceExcel = [Select Id,Subscription_Opportunity_Name__c,Opportunity__c,Quote__c,Account__c from 
+                                                    dm_Invoice_InvoiceLine__c 
+                                                    where Subscription_Opportunity_Name__c in :oppNameToQuoteMap.keySet() 
+                                                    and Subscription_Opportunity_Name__c != null ];//and (Account__c = null or Opportunity__c = null or Quote__c = null)];
+    //Map the records with Opp Names
+      for(dm_Invoice_InvoiceLine__c invEx : invoiceExcel){
+    	if(oppNameToInvExcel.containsKey(invEx.Subscription_Opportunity_Name__c))
+            oppNameToInvExcel.get(invEx.Subscription_Opportunity_Name__c).add(invEx);
+          else oppNameToInvExcel.put(invEx.Subscription_Opportunity_Name__c,new List<dm_Invoice_InvoiceLine__c>{invEx});
+      }
+      //Map the Migrated Quotes with Excel Opp Names
+      for(String oppExlName : oppNameToInvExcel.KeySet())
+      {
+          //Check for the name in Quote
+          if(oppNameToQuoteMap.containsKey(oppExlName))
+          {
+              //Update the Opportunity Id in the Excel records
+              List<dm_Invoice_InvoiceLine__c> temp = oppNameToInvExcel.get(oppExlName);
+              for(dm_Invoice_InvoiceLine__c obj : temp)
+              {
+                  obj.Opportunity__c = oppNameToQuoteMap.get(oppExlName).SBQQ__Opportunity2__c;
+                  obj.Quote__c = oppNameToQuoteMap.get(oppExlName).Id;
+                  obj.Account__c = oppNameToQuoteMap.get(oppExlName).SBQQ__Account__c;
+                  forUpdate.add(obj);
+              }
+          }
+      }
+      if(forUpdate.size()>0)
+          Database.update(forUpdate);
+  }
+// The batch job finishes
+  public void finish(Database.BatchableContext bc){ }
+}
+@isTest
+public class dm_InvoicesLookupBatchTest {
+@testSetup
+    static void setup(){
+        //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        // Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'pc1',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        insert objProduct;
+        
+        
+        // PriceBookEntry Creation
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            Test.getStandardPricebookId(),
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+    
+        // Quote Creation
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+       
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.DM_Quote__c = True;
+        objQuote.SBQQ__Opportunity2__c = objOpportunity.Id;
+        objQuote.Manual_Fix__c = true;
+        objQuote.SBQQ__Ordered__c =  true ;
+        objQuote.SBQQ__Account__c = objAccount.Id;
+        
+        objQuote.DM_ErrorQuote__c = true;
+        insert objQuote;
+        
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            objPriceBookEntry.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+        
+        // blng__Invoice__c creation
+        blng__Invoice__c objBlngInvoice = TestDataUtility.createBlngInvoice(
+            objAccount.Id,
+            objOrder.Id
+        );
+        objBlngInvoice.Invoice_Admin_Status__c = 'Active';
+        objBlngInvoice.Product_Category__c = 'Licenses';
+        objBlngInvoice.Custom_Invoice_Date__c = Date.today().addDays(-1);
+        objBlngInvoice.blng__InvoiceDate__c = Date.today().addDays(-1);
+        objBlngInvoice.Product_Categories__c = 'Licenses';
+        objBlngInvoice.Invoice_Number__c = 0;
+        objBlngInvoice.Zuora_Invoice_Number__c = '12345';
+        objBlngInvoice.DM_Invoice__c = true;
+        insert objBlngInvoice;
+        
+        //blng__InvoiceLine__c creation
+        
+        blng__InvoiceLine__c objBlngInvoiceLine = new blng__InvoiceLine__c();
+        objBlngInvoiceLine.blng__Invoice__c = objBlngInvoice.Id ; 
+        objBlngInvoiceLine.blng__Subtotal__c = 5700;
+        objBlngInvoiceLine.DM_InvLine__c = true;
+        insert objBlngInvoiceLine;
+        
+        //blng__Payment__c creation
+        blng__Payment__c bpayment = new blng__Payment__c();
+        bpayment.blng__Account__c = objAccount.Id;
+        bpayment.blng__Invoice__c = objBlngInvoice.Id;
+        bpayment.blng__PaymentType__c = 'Cash';
+        bpayment.blng__PaymentDate__c = system.today();        
+        bpayment.Zuora_Invoice_Number__c = '12345';
+        bpayment.DM_Payment__c = True;
+        bpayment.blng__Amount__c = 100;
+        
+        insert bpayment;
+
+         //dm_Invoice_InvoiceLine__c Creation
+        dm_Invoice_InvoiceLine__c ObjdmInvoice = new dm_Invoice_InvoiceLine__c();
+        ObjdmInvoice.Opportunity__c = objOpportunity.id;
+        ObjdmInvoice.Invoice_Invoice_Number__c= 'aEf7800000001s0';
+        ObjdmInvoice.Order__c = objOrder.id;
+        ObjdmInvoice.Quote__c = objQuote.id ;
+        ObjdmInvoice.Account__c = objAccount.Id;
+        ObjdmInvoice.Subscription_Opportunity_Name__c = 'Test Opportunity';
+        insert ObjdmInvoice;
+    }
+     @isTest 
+    public static void dm_InvoicesLookupBatchTest1(){
+        Test.startTest();
+        dm_InvoicesLookupBatch bc = new dm_InvoicesLookupBatch();
+        Id batchId = Database.executeBatch(bc);
+        Test.stopTest();
+    }
+    
+    
+    
+    }

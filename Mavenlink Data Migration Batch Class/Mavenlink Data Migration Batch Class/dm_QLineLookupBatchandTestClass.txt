@@ -1,0 +1,150 @@
+//dm_QLineLookupBatch 
+//Update QL lookup
+global class dm_QLineLookupBatch implements  Database.Batchable<sObject>,Database.Stateful {
+  // The batch job starts
+    global Database.querylocator start(Database.BatchableContext BC){
+       //Quote 
+    String queryDMCpqQuote = 'Select Id,Account__c,Opportunity__c,Opportunity_Opportunity_18_Digit_Id__c,'
+                     +'Opportunity_Opportunity_Name__c,Payment_Term__c,dm_StartDate__c,dm_EndDate__c  from dm_cpq_Quote__c where '
+        			+'Opportunity_Opportunity_Name__c != null and Opportunity_Opportunity_18_Digit_Id__c != null ';
+      return Database.getQueryLocator(queryDMCpqQuote);
+  }
+    // The batch job executes and operates on one batch of records
+  global void execute(Database.BatchableContext bc, List<dm_cpq_Quote__c> zQuote){
+    updateOppIdLookupInDMQuote(zQuote);//Opp,Account,StartDate,Enddate,Term
+  }
+   //Update Zuora Quote' Opp lookup with 18 digit id
+   //Based on Acc Opps update CPQ Quote - Acc
+ public static void updateOppIdLookupInDMQuote(List<dm_cpq_Quote__c> quotes)
+ {
+    //Get the Opp with Account
+     Map<String,dm_cpq_Quote__c> quoteMap = new Map<String,dm_cpq_Quote__c>();//oppList);
+	 Set<String> oppNames = new Set<String>();
+     List<dm_cpq_Quote__c> forUpdateQuote = new List<dm_cpq_Quote__c>();
+     //**** For Account,Opportunity,Start Date and End date lookup
+     for(dm_cpq_Quote__c q : quotes)
+     {
+        // oppNames.add(q.Opportunity_Opportunity_Name__c);
+        // q.Opportunity__c = q.Opportunity_Opportunity_18_Digit_Id__c;
+        // forUpdateQuote.add(q);
+         quoteMap.put(q.Opportunity_Opportunity_Name__c,q);
+     }
+     List<dm_OpportunityProducts__c> oppProds = [Select Id,OPPORTUNITYID__c ,ACCOUNT_ID_C__c,
+                                                OPPORTUNITY_NAME_C__c,START_DATE_C__c,END_DATE_C__c,PAYMENT_TERMS_C__c
+                                                 from dm_OpportunityProducts__c 
+                                          where OPPORTUNITY_NAME_C__c != null and OPPORTUNITYID__c != null and ACCOUNT_ID_C__c != null
+                                     and OPPORTUNITY_NAME_C__c in :quoteMap.keySet()];
+	
+     Map<String,dm_OpportunityProducts__c> oppMap = new Map<String,dm_OpportunityProducts__c>();//oppList);
+     ///**************** Customer Email
+         //Based on dm Zura Customer update the dm CPQ Quote Customer Email with Account id
+     Map<Id,dm_cpq_Quote__c> qMap = new Map<Id,dm_cpq_Quote__c>();
+     Map<Id,String> accToEmailMap = new Map<Id,String>();
+     Set<String> truncatedIds = new Set<String>();
+     for(dm_cpq_Quote__c acc : quotes)
+     {
+         //accMap.put(acc.Account__c.to15(),acc);
+         qMap.put(acc.Account__c,acc);
+     }
+     List<dm_Zuora_Customer__c> customers = [Select Id,Bill_To_Work_Email__c,Account_CRM_Account_ID__c from dm_Zuora_Customer__c
+                                             where Account_CRM_Account_ID__c != null  and Account_CRM_Account_ID__c in :qMap.keySet()];
+	 for(dm_Zuora_Customer__c cust : customers)
+     {
+         if(qMap.containsKey(cust.Account_CRM_Account_ID__c))
+         {
+            if(! accToEmailMap.containsKey(cust.Account_CRM_Account_ID__c))
+                accToEmailMap.put(cust.Account_CRM_Account_ID__c,cust.Bill_To_Work_Email__c);
+         }
+     }
+     //*************
+     for(dm_OpportunityProducts__c oppProd : oppProds)
+     {
+         if(quoteMap.containsKey(oppProd.OPPORTUNITY_NAME_C__c))
+         {
+             dm_cpq_Quote__c quoteTemp = quoteMap.get(oppProd.OPPORTUNITY_NAME_C__c);
+             quoteTemp.Opportunity__c = oppProd.OPPORTUNITYID__c;
+             quoteTemp.Account__c = oppProd.ACCOUNT_ID_C__c;
+             quoteTemp.dm_StartDate__c = oppProd.START_DATE_C__c;
+             quoteTemp.dm_EndDate__c = oppProd.END_DATE_C__c;
+             quoteTemp.Payment_Term__c = oppProd.PAYMENT_TERMS_C__c;
+             if(accToEmailMap.containsKey(oppProd.ACCOUNT_ID_C__c))
+                 quoteTemp.dm_BillToCustomerEmail__c = accToEmailMap.get(oppProd.ACCOUNT_ID_C__c);
+             //quoteTemp.Contract__c = oppProd.co;
+             if(! forUpdateQuote.contains(quoteTemp))
+              forUpdateQuote.add(quoteTemp);
+         }
+     }
+     
+	System.debug('Count:'+forUpdateQuote.size());
+	Database.update(forUpdateQuote);
+ }
+  // The batch job finishes
+  global void finish(Database.BatchableContext bc){ }
+
+}
+
+//test-Class
+//dm_QLineLookupBatchTest
+@isTest
+public class dm_QLineLookupBatchTest {
+	@testSetup
+    static void setup(){
+        
+         //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        List<Account> accId = [Select ID from Account where Name = 'Test Account' Limit 1];
+        // Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        insert objOpportunity;
+        List<Opportunity> oppId = [Select ID from Opportunity where Name = 'Test Opportunity'  Limit 1];
+        //dm_cpq_Quote__c creation
+        
+        dm_cpq_Quote__c ObjdmCPQQuote = new dm_cpq_Quote__c();
+        ObjdmCPQQuote.Account__c = objAccount.Id;
+        ObjdmCPQQuote.Opportunity__c = objOpportunity.Id;
+        ObjdmCPQQuote.Opportunity_Opportunity_18_Digit_Id__c = oppId[0].Id;
+        ObjdmCPQQuote.Opportunity_Opportunity_Name__c = 'Very Good Ventures + 7 (13) Enterprise';
+        ObjdmCPQQuote.Payment_Term__c = 'Due Upon Receipt';
+        ObjdmCPQQuote.dm_StartDate__c = system.today();
+        ObjdmCPQQuote.dm_EndDate__c = system.today()+30;
+        
+        insert ObjdmCPQQuote;
+        
+        //dm_OpportunityProducts__c creation 
+        
+        dm_OpportunityProducts__c ObjdmOppProduct = new dm_OpportunityProducts__c();
+		ObjdmOppProduct.OPPORTUNITYID__c = oppId[0].Id;
+        ObjdmOppProduct.ACCOUNT_ID_C__c  = accId[0].Id;
+        ObjdmOppProduct.OPPORTUNITY_NAME_C__c = 'Very Good Ventures + 7 (13) Enterprise';
+        ObjdmOppProduct.START_DATE_C__c = system.today();
+        ObjdmOppProduct.END_DATE_C__c = system.today()+30;
+        ObjdmOppProduct.PAYMENT_TERMS_C__c = '24';
+        
+        insert ObjdmOppProduct;
+        
+        //dm_Zuora_Customer__c creation
+        dm_Zuora_Customer__c ObjdmZuoraCust = new dm_Zuora_Customer__c();
+        ObjdmZuoraCust.Bill_To_Work_Email__c = 'test@gmail.com';
+        ObjdmZuoraCust.Account_CRM_Account_ID__c = accId[0].Id ;
+        
+        insert ObjdmZuoraCust;
+        
+}
+     @isTest
+    public static void dm_QLineLookupBatchTest1(){
+        Test.startTest();
+        dm_QLineLookupBatch bc = new dm_QLineLookupBatch();
+        Id BatchId = Database.executeBatch(bc);
+        Test.stopTest();
+    }
+}

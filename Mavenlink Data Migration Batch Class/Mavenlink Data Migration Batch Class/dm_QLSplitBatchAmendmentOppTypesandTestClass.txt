@@ -1,0 +1,2339 @@
+//dm_QLSplitBatchAmendmentOppTypes
+//Split the Quote lines for MDQ format - in temp table-----------------CHECK FLAGS
+public class dm_QLSplitBatchAmendmentOppTypes implements Database.Batchable<sObject>,Database.Stateful {
+public static final String LICENSES_PRODUCT_CATEGORY = 'Licenses'; 
+public static final List<String> OPP_RECORD_TYPES = new List<String>{'Additional Opportunity','Add-On','Adjustment Opportunity','Assisted User Expansion'};
+ public database.querylocator start(Database.BatchableContext BC)
+{
+    
+   //Quote Line preparation fro Temp table - Split from Opp Prod 
+   //Opportunity_Temp__c - is a look up field,Quote_Temp__c  lookup - Remove the Quote_Temp__c for other logic
+   /*String queryOppProdsForQL = 'Select Id,Old_Opp_End_date__c,dm_Product_Name_New__c,Quote_Temp__r.SBQQ__Opportunity2__r.RecordType.Name,dm_Opp_Prod_Count_for_Opp__c,dm_ProductId_New__c,Quote_Temp__c,DISCOUNT_AMOUNT_C__c,TOTALPRICE__c,Opportunity_Temp__c,Opportunity_Temp__r.Start_Date__c,'
+       					+'Opportunity_Temp__r.End_Date__c,LICENSE_PRICE_C__c,END_DATE_C__c,ACCOUNT_ID_C__c,OPPORTUNITYID__c,CONTRACT_ID_NEW_C__c,'
+       					+'START_DATE_C__c,Subscription_Term__c,OPPORTUNITY_NAME_C__c,PRODUCT_NAME_C__c,PC_1_C__c,TERM_C__c,LISTPRICE__c,OPPPRODID_C__c,PRODUCT2ID__c,QUANTITY__c,MONTHLY_RECURRING_REVENUE_C__c '
+       					+'from dm_OpportunityProducts__c where OPPORTUNITY_NAME_C__c != null and OPPORTUNITYID__c != null and ACCOUNT_ID_C__c != null'
+                        +' and dm_ProductId_New__c != null'
+       				    + ' and Quote_Temp__c != null'//;// and From_Prod__c = true and  (Quote_Temp__r.Name =\'Q-01852\' or Quote_Temp__r.Name =\'Q-01846\' or Quote_Temp__r.Name =\'Q-01856\')';//limit 10';//and TERM_C__c > 40 and TERM_C__c <= 100';
+   						+ ' and Quote_Temp__r.Dm_Check__c = true';*/
+    String queryOppProdsForQL ='Select Id,dm_Product_Name_New__c,Quote_Temp__r.SBQQ__Opportunity2__r.RecordType.Name,dm_Opp_Prod_Count_for_Opp__c,dm_ProductId_New__c,Quote_Temp__c,DISCOUNT_AMOUNT_C__c,TOTALPRICE__c,Opportunity_Temp__c,Opportunity_Temp__r.Start_Date__c,'
+       					+'Opportunity_Temp__r.End_Date__c,LICENSE_PRICE_C__c,END_DATE_C__c,ACCOUNT_ID_C__c,OPPORTUNITYID__c,CONTRACT_ID_NEW_C__c,'
+       					+'START_DATE_C__c,Subscription_Term__c,OPPORTUNITY_NAME_C__c,PRODUCT_NAME_C__c,PC_1_C__c,TERM_C__c,LISTPRICE__c,OPPPRODID_C__c,PRODUCT2ID__c,QUANTITY__c,MONTHLY_RECURRING_REVENUE_C__c '
+       					+'from dm_OpportunityProducts__c where OPPORTUNITY_NAME_C__c != null and OPPORTUNITYID__c != null and ACCOUNT_ID_C__c != null'
+                        +' and dm_ProductId_New__c != null'
+       				    + ' and Quote_Temp__c != null'//;// and From_Prod__c = true and  (Quote_Temp__r.Name =\'Q-01852\' or Quote_Temp__r.Name =\'Q-01846\' or Quote_Temp__r.Name =\'Q-01856\')';//limit 10';//and TERM_C__c > 40 and TERM_C__c <= 100';
+   						+ ' and Quote_Temp__r.Dm_Check__c = true';
+    return Database.getQueryLocator(queryOppProdsForQL);
+}
+public void execute(Database.BatchableContext BC,List<dm_OpportunityProducts__c> oppProdsExcel){
+ splitLogicForCPQ(oppProdsExcel);
+}
+ //New Logic with Opportunity Type - Ammendment records
+ public static void splitLogicForCPQ( List<dm_OpportunityProducts__c> oppProdsExcel)
+ 
+ {
+     //Split only Licenses products (PC_1_C__c) and Preserve other products without splitting but with AdditionalDisc calculation
+     System.debug('oppProdsExcel Count:'+oppProdsExcel.size());
+     List<dm_Split_ForQLImport__c> forInsert = new List<dm_Split_ForQLImport__c>();
+     Map<Id,List<dm_OpportunityProducts__c>> prodToOppProdMap = new  Map<Id,List<dm_OpportunityProducts__c>>();
+   	 //Get theCurrent PriceBook unit price for each opp prod
+   	 Map<Id,PriceBookEntry> oppProdWithPBPriceMap = new Map<Id,PriceBookEntry>();
+     //Get the Current Dimension for each prod
+   	 Map<Id,String > productToDimensionMap = new Map<Id,String>();
+     // Get the Unique Products and it's Price book details 
+   	 for(dm_OpportunityProducts__c oppProd :oppProdsExcel)
+     {
+        // if(prodToOppProdMap.containsKey(oppProd.PRODUCT2ID__c))
+         //prodToOppProdMap.get(oppProd.PRODUCT2ID__c).add(oppProd);
+         //else prodToOppProdMap.put(oppProd.PRODUCT2ID__c,new List<dm_OpportunityProducts__c>{oppProd});
+         if(prodToOppProdMap.containsKey(oppProd.dm_ProductId_New__c))
+         prodToOppProdMap.get(oppProd.dm_ProductId_New__c).add(oppProd);
+         else prodToOppProdMap.put(oppProd.dm_ProductId_New__c,new List<dm_OpportunityProducts__c>{oppProd});
+         
+     }
+    //Price Book Entries
+     Id pbId = [Select Id from PriceBook2 where Name = 'Standard Price Book'].Id;
+     List<PricebookEntry> pbEntries = [SELECT PriceBookEntryId__c,Product2.Name, Pricebook2Id, Product2Id,Product2.PC_1__c, UnitPrice FROM PricebookEntry 
+                                   where Pricebook2Id = :pbId and Product2Id in :prodToOppProdMap.keySet()];
+    //Get the Unit Proce for each product
+     for(PricebookEntry pbe : pbEntries)
+     {
+         if(prodToOppProdMap.containsKey(pbe.Product2Id))
+         {
+             List<dm_OpportunityProducts__c> temp = prodToOppProdMap.get(pbe.Product2Id);
+             if(temp.size()>0)
+             {
+                 for(dm_OpportunityProducts__c obj :temp)
+                 {
+                    oppProdWithPBPriceMap.put(obj.Id,pbe);
+                 }
+             }
+         
+         }
+     }
+     //Price Dimension
+     List<SBQQ__Dimension__c> dimensions = [SELECT Id,Name,SBQQ__PriceBook__c, SBQQ__PriceEditable__c, SBQQ__Product__c, 
+                                       SBQQ__UnitPrice__c FROM SBQQ__Dimension__c where 
+                                            SBQQ__Product__c in : prodToOppProdMap.keySet() ];
+     //Map the Product with Dimention
+     for(SBQQ__Dimension__c dimen : dimensions) 
+     {
+         if(prodToOppProdMap.containsKey(dimen.SBQQ__Product__c))
+         productToDimensionMap.put(dimen.SBQQ__Product__c,dimen.Id);
+     }
+     for(dm_OpportunityProducts__c oppProdObj : oppProdsExcel)
+     {
+         //Check the Opportunity Record Types - if is Adjustment Opportunity,Additional Opportunity ,Add on ,Assisted User expansion 
+         //Thats is If Start date was 2/1/2022  and end date 3/30/2023, the 2 quote lines should be split as 
+		//QL1 : SD 2/1/2022 ED : 3/31/2022
+		//Ql2: SD 4/1/2022 to ED: 3/30/2023
+		//
+		// Start Date:2020-01-09 End Date: 2022-10-29
+		//Line 1: 2020-01-09 to 2020-10-29 -(10 months, 20 days)
+//Line 2: 2020-10-30 to 2021-10-29 -(12 months)
+//Line 3: 2021-10-30 to 2022-10-29 -(12 months)
+        if(OPP_RECORD_TYPES.contains(oppProdObj.Quote_Temp__r.SBQQ__Opportunity2__r.RecordType.Name) )
+        {
+         //obj.Order_Start_Date__c
+         //obj.Order_End_Date__c
+         //obj.Term__c
+         Integer term = Integer.valueOf(Math.floor(oppProdObj.TERM_C__c));//Round off to the lowest value e.g 28.9 means 28
+		 Integer YEAR = 12; 
+         Integer loopCount = term/YEAR ;//Get the Integer value
+         //Get the Mod value , that should be added to the last date's month 
+         //E.g 25 months = 12 months for 2 years and one month for last one.
+         Integer groupSeq = 1;
+         Integer modValue = Math.mod(term,YEAR);
+         Date startDate = oppProdObj.START_DATE_C__c;
+         Date endDate = oppProdObj.END_DATE_C__c;
+         Date startDateFromLoop = null;
+         Date endDateFromLoop = null;
+         System.debug('Start Date:'+oppProdObj.START_DATE_C__c+'  End Date: '+oppProdObj.END_DATE_C__c);
+         //Calculate the Additional Disc
+         System.debug('modValue:'+modValue);
+         System.debug('loopCount:'+loopCount);
+         System.debug('Term__c:'+oppProdObj.TERM_C__c);
+         System.debug('Quantity:'+oppProdObj.QUANTITY__c);
+         System.debug('Opp Prod Total Price:'+oppProdObj.TOTALPRICE__c); 
+         System.debug('Price Book Val:'+oppProdWithPBPriceMap.get(oppProdObj.Id)); 
+         Decimal defPriceBasedonPB = 0;//(oppProdWithPBPriceMap.get(oppProdObj.Id)) * oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c;
+         String dimension = productToDimensionMap.get(oppProdObj.dm_ProductId_New__c);
+         //oppProd.PRODUCT_NAME_C__c Mavenlink Enterprise License-CPQ ='01t78000000tzvrAAA' 
+         // Edition: Custom Integration-CPQ = '01t78000000tzxqAAA'
+         //Edition: Jira-CPQ = 01t78000000tzwSAAQ 
+         //Decimal matchedPrice = defPriceBasedonPB - additionalDiscAmount;
+         //System.debug('matchedPrice:'+matchedPrice);
+         //Get the Order Date Difference to verify the term -Sometimes the dates are b/w year and the term is 36
+         //Add Licenses product category check- to split only those records.
+        //////TTTTTTTTTTTTTTTTTTOOOOOOOOOOOOOOOOOOOO- Enable INSERT&&&&&&&&&&&&&&&&&&&&&&&&&&&&&%%%%%%%%%%%%%%%%%%%%%
+         if('Account Credit - Licenses-CPQ' == oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.Name)
+         {System.debug('Product Err:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c);
+          System.debug('Product Err Name:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.Name);}
+         //System.debug('Product Err:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c);
+         if(loopCount > 0 && startDate.monthsBetween(endDate) > 12 && oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c == LICENSES_PRODUCT_CATEGORY)//oppProdObj.PC_1_C__c == LICENSES_PRODUCT_CATEGORY )
+         {
+           //Create the Split Records for the QL
+           
+           if(modValue != null && modValue > 0)
+           {
+               Date newStartDate = startDate;
+               Date newEndDate = Date.newInstance(startDate.year(), startDate.month()+modValue,endDate.day());
+               startDateFromLoop = newEndDate;
+			   System.debug('Mod '+':Start Date: '+newStartDate);
+               System.debug('Mod '+':End Date: '+ newEndDate);
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               newObj.BillingType__c = 'Advance';
+               newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Old_Opp_Prod_End_Date__c = oppProdObj.END_DATE_C__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+               newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+               //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+               Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+               Decimal originalSalePriceForQL = perMonthCost * modValue;
+         	   Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+        	   Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+        	   //Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*modValue;//modValue * oppProdObj.QUANTITY__c * discPricePerUnit; 
+               Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+               newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/modValue : 0;
+               if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * modValue * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {//newObj.Discount__c = 0;
+                        newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * modValue * (-1);}
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0; 
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;}
+                   }
+                newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+               System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+               newObj.Opportunity_Product__c = oppProdObj.Id;
+               newObj.DefaultSubscriptionTerm__c = 1;
+         		newObj.SubscriptionTerm__c = modValue;
+         		newObj.SubscriptionPricing__c = 'Fixed Price';
+         		newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         		//newObj.BillingFrequency__c = 'Annual';
+               newObj.ChargeType__c = 'Recurring';
+               newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+               newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+               newObj.Dimension__c = dimension;
+               newObj.SegmentLabel__c = 'Year '+ groupSeq;//'Year '+(loopCount+1);
+               newObj.SegmentIndex__c = groupSeq;//loopCount+1;
+               newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+               System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+               System.debug('Old Disc Price:'+oldDiscPrice);
+         	   System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         	   //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         
+               newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;// newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c;// * (oppProdObj.TERM_C__c-(loopCount * YEAR));
+       		   newObj.Start_Date__c = newStartDate;
+       		   newObj.End_Date__c = newEndDate;
+               groupSeq = groupSeq + 1;
+               //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+               //System.debug('Mod '+':additionalDiscAmount: '+ additionalDiscAmount);
+      		   forInsert.add(newObj);  
+           }
+           for(Integer i=0;i< loopCount ;i++)  
+           {
+               if(i == 0){
+                   Date newStartDate = null;
+			       Date newEndDate = null;                   
+                   if(startDateFromLoop == null){
+                       newStartDate = Date.newInstance(startDate.year(), startDate.month(), startDate.day());
+               		   newEndDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()-1);
+                       //System.debug('i=0 Loop null'+i+':newStartDate: '+ newStartDate);
+               		   //System.debug('i=0 Loop null'+i+':newEndDate: '+ newEndDate);
+                       startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                   }
+                   else
+                   {
+                       newStartDate = Date.newInstance(startDateFromLoop.year(), startDateFromLoop.month(),startDateFromLoop.day()+1);
+               		   newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       //System.debug('Loop null'+i+':Start Date: '+ newStartDate);
+               		   //System.debug('Loop null'+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       //System.debug('Loop null'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   //System.debug('Loop null'+i+':endDateFromLoop: '+ endDateFromLoop);
+                   }
+               System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Old_Opp_Prod_End_Date__c = oppProdObj.END_DATE_C__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+                newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         		Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         		Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         		Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         		//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;//YEAR * oppProdObj.QUANTITY__c * discPricePerUnit;
+                Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                //System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+                //System.debug('Old Disc Price:'+oldDiscPrice);
+         		//System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		//System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+                //System.debug(' oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice); 
+                if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                   else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                        //newObj.Discount__c = 0;
+                       }
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                        //newObj.AdditionalDiscAmountTemp__c = 0;
+                       }
+                   }
+         		//System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                newObj.BillingType__c = 'Advance';
+                newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                newObj.Opportunity_Product__c = oppProdObj.Id;
+                newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+                newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+                newObj.DefaultSubscriptionTerm__c = 1;
+         		newObj.SubscriptionTerm__c = YEAR;
+         		newObj.SubscriptionPricing__c = 'Fixed Price';
+         		newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         		//newObj.BillingFrequency__c = 'Annual';
+                newObj.ChargeType__c = 'Recurring';
+                newObj.Dimension__c = dimension;
+                newObj.SegmentLabel__c = 'Year '+ groupSeq;//'Year '+(i+1);
+                newObj.SegmentIndex__c = groupSeq ;//i+1;
+                newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+         		newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+                newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+                //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;
+                //newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+                newObj.Start_Date__c = newStartDate;
+                newObj.End_Date__c = newEndDate;
+                groupSeq = groupSeq + 1;
+                //newObj.Opportunity_Product__c = oppProdObj.Id;//OPPPRODID_C__c;
+               //System.debug('Loop '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               forInsert.add(newObj);     
+               }
+               else{
+                   /*if(startDateFromLoop == null){
+                       Date newStartDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day());
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       //System.debug('Loop null'+i+':Start Date: '+ newStartDate);
+               		   //System.debug('Loop null'+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       System.debug('Loop null'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   System.debug('Loop null'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                        dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+                        newObj.BillingType__c = 'Advance';
+                        newObj.Opportunity_Product__c = oppProdObj.Id;
+                        newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+            		    newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+               		    newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               			newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               			newObj.Quantity__c = oppProdObj.QUANTITY__c;
+                        newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                        newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+              		    //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               		    //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+                       Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         				Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         				Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         				Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         				//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;// YEAR * oppProdObj.QUANTITY__c * discPricePerUnit;
+                       Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                		newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                		if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                		{
+                    		newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    		//newObj.Discount__c = 0;
+                		}
+                   		else {
+                      		 if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                             {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                              //newObj.Discount__c = 0;
+                             }
+                      		 else 
+                        	//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                        	newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                            //newObj.AdditionalDiscAmountTemp__c = 0;
+                   		}
+                       newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                       System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+                       System.debug('Old Disc Price:'+oldDiscPrice);
+         		       System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		       //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         				//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+         				System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				//newObj.BillingFrequency__c = 'Annual';
+                        newObj.ChargeType__c = 'Recurring';
+                        newObj.Dimension__c = dimension;
+                        newObj.SegmentLabel__c = 'Year '+(i+1);
+                        newObj.SegmentIndex__c = i+1;
+                        newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+                        newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               			newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               			//newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;
+               			//newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               			newObj.Start_Date__c = newStartDate;
+               			newObj.End_Date__c = newEndDate;
+                        //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+                      // System.debug('Loop null '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               			forInsert.add(newObj);     
+                   }
+                   else{*/
+                       //System.debug('Loop before'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   //System.debug('Loop before'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                       Date newStartDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month(),endDateFromLoop.day()+1);
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               		   System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+                       newObj.BillingType__c = 'Advance';
+                       newObj.Opportunity_Product__c = oppProdObj.Id;
+                       newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+            		   newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+                       newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               		   newObj.Quote__c = oppProdObj.Quote_Temp__c;
+                       newObj.Old_Opp_Prod_End_Date__c = oppProdObj.END_DATE_C__c;
+               		   newObj.Quantity__c = oppProdObj.QUANTITY__c;
+                       newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                       newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+                       Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                       newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                		//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+         				//System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				//newObj.BillingFrequency__c = 'Annual';
+               		   //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               			//{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+				        Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         				Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         				Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         				Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         				//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;//YEAR * oppProdObj.QUANTITY__c * discPricePerUnit; 
+                                      			System.debug('Old Disc Price:'+oldDiscPrice);
+                       //System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+         				//System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         				//System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         				newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               			newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               			//newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;//newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               		   newObj.Start_Date__c = newStartDate;
+               		   newObj.End_Date__c = newEndDate;
+                       //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+                       //System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				newObj.BillingFrequency__c = 'Annual';
+                        newObj.ChargeType__c = 'Recurring';
+                        newObj.Dimension__c = dimension;
+                        newObj.SegmentLabel__c = 'Year '+ groupSeq;//+(i+1);
+                        newObj.SegmentIndex__c = groupSeq;//i+1;
+                        newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+                       if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                		{
+                    		newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    		//newObj.Discount__c = 0;
+               			 }
+                  	 else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                        //newObj.Discount__c = 0;
+                       }
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0;
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;}
+                   }
+                   newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                   groupSeq = groupSeq + 1;
+                       //System.debug('Loop '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               		   forInsert.add(newObj);  
+                  // }
+               
+               
+               }
+           }
+           
+         }
+         else
+         {
+             //Nomultiple year, lesser than 12 - single year or Services Product
+             Integer monthsBetweenDates = startDate.monthsBetween(endDate);
+             dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+             newObj.Opportunity_Product__c = oppProdObj.Id;
+             newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+             newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+             newObj.Quote__c = oppProdObj.Quote_Temp__c;
+             newObj.Old_Opp_Prod_End_Date__c = oppProdObj.END_DATE_C__c;
+             newObj.Quantity__c = oppProdObj.QUANTITY__c;
+             newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+             newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+             //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+             //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+             Decimal perMonthCost =  monthsBetweenDates ==0 ? 0 : oppProdObj.TOTALPRICE__c/monthsBetweenDates;
+         	 Decimal originalSalePriceForQL = monthsBetweenDates ==0 ? 0 : perMonthCost * monthsBetweenDates;
+         	 Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         	 Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         	 //Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c) * monthsBetweenDates;//monthsBetweenDates * oppProdObj.QUANTITY__c * discPricePerUnit; 
+             //Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+               newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c ;
+             if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * monthsBetweenDates * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                   else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {//newObj.Discount__c = 0;
+                        newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * monthsBetweenDates * (-1);}
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0;
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice) * 100;}
+                   }
+             newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+             System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);	
+             // newObj.DefaultSubscriptionTerm__c = 1;
+             newObj.SubscriptionTerm__c = oppProdObj.TERM_C__c;
+             newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+             newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+         	 //newObj.SubscriptionPricing__c = 'Fixed Price';
+             newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         	 //newObj.BillingFrequency__c = 'Annual';
+             newObj.ChargeType__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c == LICENSES_PRODUCT_CATEGORY ? 'Recurring' :'One-Time';
+             newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+             System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+             System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+             System.debug('Old Disc Price:'+oldDiscPrice);
+        	 System.debug('Disc Price Per Unit:'+discPricePerUnit);
+          	 //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+           
+             newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+             newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+             //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;//newObj.List_Unit_Price__c = oppProdObj.LISTPRICE__c;
+             newObj.Start_Date__c = oppProdObj.START_DATE_C__c;
+             newObj.End_Date__c = oppProdObj.END_DATE_C__c;
+             //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+             System.debug('Single Year Start Date:'+oppProdObj.START_DATE_C__c);
+               System.debug('Single Year End Date:'+ oppProdObj.END_DATE_C__c);
+            // System.debug('Single Year '+':additionalDiscAmount: '+ additionalDiscAmount);
+             forInsert.add(newObj); 
+         }
+      }
+       /*else
+        {
+         //obj.Order_Start_Date__c
+         //obj.Order_End_Date__c
+         //obj.Term__c
+         Integer term = Integer.valueOf(Math.floor(oppProdObj.TERM_C__c));//Round off to the lowest value e.g 28.9 means 28
+		 Integer YEAR = 12; 
+         Integer loopCount = term/YEAR ;//Get the Integer value
+         //Get the Mod value , that should be added to the last date's month 
+         //E.g 25 months = 12 months for 2 years and one month for last one.
+         Integer modValue = Math.mod(term,YEAR);
+         Date startDate = oppProdObj.START_DATE_C__c;
+         Date endDate = oppProdObj.END_DATE_C__c;
+         Date startDateFromLoop = null;
+         Date endDateFromLoop = null;
+         System.debug('Start Date:'+oppProdObj.START_DATE_C__c+'  End Date: '+oppProdObj.END_DATE_C__c);
+         //Calculate the Additional Disc
+         System.debug('modValue:'+modValue);
+         System.debug('loopCount:'+loopCount);
+         System.debug('Term__c:'+oppProdObj.TERM_C__c);
+         System.debug('Quantity:'+oppProdObj.QUANTITY__c);
+         System.debug('Opp Prod Total Price:'+oppProdObj.TOTALPRICE__c); 
+         System.debug('Price Book Val:'+oppProdWithPBPriceMap.get(oppProdObj.Id)); 
+         Decimal defPriceBasedonPB = 0;//(oppProdWithPBPriceMap.get(oppProdObj.Id)) * oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c;
+         String dimension = productToDimensionMap.get(oppProdObj.dm_ProductId_New__c);
+         //oppProd.PRODUCT_NAME_C__c Mavenlink Enterprise License-CPQ ='01t78000000tzvrAAA' 
+         // Edition: Custom Integration-CPQ = '01t78000000tzxqAAA'
+         //Edition: Jira-CPQ = 01t78000000tzwSAAQ 
+         //Decimal matchedPrice = defPriceBasedonPB - additionalDiscAmount;
+         //System.debug('matchedPrice:'+matchedPrice);
+         //Get the Order Date Difference to verify the term -Sometimes the dates are b/w year and the term is 36
+         //Add Licenses product category check- to split only those records.
+        //////TTTTTTTTTTTTTTTTTTOOOOOOOOOOOOOOOOOOOO- Enable INSERT&&&&&&&&&&&&&&&&&&&&&&&&&&&&&%%%%%%%%%%%%%%%%%%%%%
+         if('Account Credit - Licenses-CPQ' == oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.Name)
+         {System.debug('Product Err:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c);
+          System.debug('Product Err Name:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.Name);}
+         //System.debug('Product Err:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c);
+         if(loopCount > 0 && startDate.monthsBetween(endDate) > 12 && oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c == LICENSES_PRODUCT_CATEGORY)//oppProdObj.PC_1_C__c == LICENSES_PRODUCT_CATEGORY )
+         {
+           //Create the Split Records for the QL
+           for(Integer i=0;i< loopCount ;i++)  
+           {
+               if(i == 0){
+               Date newStartDate = Date.newInstance(startDate.year(), startDate.month(), startDate.day());
+               Date newEndDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()-1);
+               System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Old_Opp_Prod_End_Date__c = oppProdObj.END_DATE_C__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+                newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         		Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         		Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         		Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         		//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;//YEAR * oppProdObj.QUANTITY__c * discPricePerUnit;
+                Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+                System.debug('Old Disc Price:'+oldDiscPrice);
+         		System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		//System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+                System.debug(' oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice); 
+                if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                   else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                        //newObj.Discount__c = 0;
+                       }
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                        //newObj.AdditionalDiscAmountTemp__c = 0;
+                       }
+                   }
+         		System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                newObj.BillingType__c = 'Advance';
+                newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                newObj.Opportunity_Product__c = oppProdObj.Id;
+                newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+                newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+                newObj.DefaultSubscriptionTerm__c = 1;
+         		newObj.SubscriptionTerm__c = YEAR;
+         		newObj.SubscriptionPricing__c = 'Fixed Price';
+         		newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         		//newObj.BillingFrequency__c = 'Annual';
+                newObj.ChargeType__c = 'Recurring';
+                newObj.Dimension__c = dimension;
+                newObj.SegmentLabel__c = 'Year '+(i+1);
+                newObj.SegmentIndex__c = i+1;
+                newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+         		newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+                newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+                //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;
+                //newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+                newObj.Start_Date__c = newStartDate;
+                newObj.End_Date__c = newEndDate;
+                //newObj.Opportunity_Product__c = oppProdObj.Id;//OPPPRODID_C__c;
+               //System.debug('Loop '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               forInsert.add(newObj);     
+               }
+               else{
+                   if(startDateFromLoop == null){
+                       Date newStartDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day());
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       //System.debug('Loop null'+i+':Start Date: '+ newStartDate);
+               		   //System.debug('Loop null'+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       System.debug('Loop null'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   System.debug('Loop null'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                        dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+                        newObj.BillingType__c = 'Advance';
+                        newObj.Opportunity_Product__c = oppProdObj.Id;
+                        newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+            		    newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+               		    newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               			newObj.Quote__c = oppProdObj.Quote_Temp__c;
+						newObj.Old_Opp_Prod_End_Date__c = oppProdObj.END_DATE_C__c;
+               			newObj.Quantity__c = oppProdObj.QUANTITY__c;
+                        newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                        newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+              		    //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               		    //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+                       Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         				Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         				Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         				Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         				//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;// YEAR * oppProdObj.QUANTITY__c * discPricePerUnit;
+                       Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                		newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                		if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                		{
+                    		newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    		//newObj.Discount__c = 0;
+                		}
+                   		else {
+                      		 if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                             {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                              //newObj.Discount__c = 0;
+                             }
+                      		 else 
+                        	//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                        	newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                            //newObj.AdditionalDiscAmountTemp__c = 0;
+                   		}
+                       newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                       System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+                       System.debug('Old Disc Price:'+oldDiscPrice);
+         		       System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		       //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         				//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+         				System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				//newObj.BillingFrequency__c = 'Annual';
+                        newObj.ChargeType__c = 'Recurring';
+                        newObj.Dimension__c = dimension;
+                        newObj.SegmentLabel__c = 'Year '+(i+1);
+                        newObj.SegmentIndex__c = i+1;
+                        newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+                        newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               			newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               			//newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;
+               			//newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               			newObj.Start_Date__c = newStartDate;
+               			newObj.End_Date__c = newEndDate;
+                        //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+                      // System.debug('Loop null '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               			forInsert.add(newObj);     
+                   }
+                   else{
+                        //System.debug('Loop before'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   //System.debug('Loop before'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                       Date newStartDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month(),endDateFromLoop.day()+1);
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               		   System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+                       newObj.BillingType__c = 'Advance';
+                       newObj.Opportunity_Product__c = oppProdObj.Id;
+                       newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+            		   newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+                       newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               		   newObj.Quote__c = oppProdObj.Quote_Temp__c;
+                       newObj.Old_Opp_Prod_End_Date__c = oppProdObj.END_DATE_C__c;
+               		   newObj.Quantity__c = oppProdObj.QUANTITY__c;
+                       newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                       newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+                       Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                       newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                		//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+         				System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				//newObj.BillingFrequency__c = 'Annual';
+               		   //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               			//{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+				        Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         				Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         				Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         				Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         				//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;//YEAR * oppProdObj.QUANTITY__c * discPricePerUnit; 
+                                      			System.debug('Old Disc Price:'+oldDiscPrice);
+                       System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+         				System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         				//System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         				newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               			newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               			//newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;//newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               		   newObj.Start_Date__c = newStartDate;
+               		   newObj.End_Date__c = newEndDate;
+                       //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+                       System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				newObj.BillingFrequency__c = 'Annual';
+                        newObj.ChargeType__c = 'Recurring';
+                        newObj.Dimension__c = dimension;
+                        newObj.SegmentLabel__c = 'Year '+(i+1);
+                        newObj.SegmentIndex__c = i+1;
+                        newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+                       if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                		{
+                    		newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    		//newObj.Discount__c = 0;
+               			 }
+                  	 else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                        //newObj.Discount__c = 0;
+                       }
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0;
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;}
+                   }
+                   newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                       //System.debug('Loop '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               		   forInsert.add(newObj);  
+                   }
+               
+               
+               }
+           }
+           if(modValue != null && modValue > 0)
+           {
+                Date newStartDate = null;
+               if(endDateFromLoop == null){
+                       newStartDate = endDateFromLoop = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()+1);
+               }
+               else 
+               newStartDate = endDateFromLoop+1;//Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month()+modValue,0);
+               Date newEndDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month()+modValue,endDateFromLoop.day());//+1);
+			   System.debug('Mod '+':Start Date: '+newStartDate);
+               System.debug('Mod '+':End Date: '+ newEndDate);
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               newObj.BillingType__c = 'Advance';
+               newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+			   newObj.Old_Opp_Prod_End_Date__c = oppProdObj.END_DATE_C__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+               newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+               //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+               Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+               Decimal originalSalePriceForQL = perMonthCost * modValue;
+         	   Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+        	   Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+        	   //Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*modValue;//modValue * oppProdObj.QUANTITY__c * discPricePerUnit; 
+               Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+               newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/modValue : 0;
+               if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * modValue * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {//newObj.Discount__c = 0;
+                        newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * modValue * (-1);}
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0; 
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;}
+                   }
+                newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+               System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+               newObj.Opportunity_Product__c = oppProdObj.Id;
+               newObj.DefaultSubscriptionTerm__c = 1;
+         		newObj.SubscriptionTerm__c = modValue;
+         		newObj.SubscriptionPricing__c = 'Fixed Price';
+         		newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         		//newObj.BillingFrequency__c = 'Annual';
+               newObj.ChargeType__c = 'Recurring';
+               newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+               newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+               newObj.Dimension__c = dimension;
+               newObj.SegmentLabel__c = 'Year '+(loopCount+1);
+               newObj.SegmentIndex__c = loopCount+1;
+               newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+               System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+               System.debug('Old Disc Price:'+oldDiscPrice);
+         	   System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         	   //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         
+               newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;// newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c;// * (oppProdObj.TERM_C__c-(loopCount * YEAR));
+       		   newObj.Start_Date__c = newStartDate;
+       		   newObj.End_Date__c = newEndDate;
+               //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+               //System.debug('Mod '+':additionalDiscAmount: '+ additionalDiscAmount);
+      		   forInsert.add(newObj);  
+           }
+         }
+         else
+         {
+             //Nomultiple year, lesser than 12 - single year or Services Product
+             Integer monthsBetweenDates = startDate.monthsBetween(endDate);
+             dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+             newObj.Opportunity_Product__c = oppProdObj.Id;
+             newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+             newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+             newObj.Quote__c = oppProdObj.Quote_Temp__c;
+   			 newObj.Old_Opp_Prod_End_Date__c = oppProdObj.END_DATE_C__c;
+             newObj.Quantity__c = oppProdObj.QUANTITY__c;
+             newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+             newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+             //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+             //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+             Decimal perMonthCost =  monthsBetweenDates ==0 ? 0 : oppProdObj.TOTALPRICE__c/monthsBetweenDates;
+         	 Decimal originalSalePriceForQL = monthsBetweenDates ==0 ? 0 : perMonthCost * monthsBetweenDates;
+         	 Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         	 Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         	 //Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c) * monthsBetweenDates;//monthsBetweenDates * oppProdObj.QUANTITY__c * discPricePerUnit; 
+             //Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+               newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c ;
+             if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * monthsBetweenDates * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                   else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {//newObj.Discount__c = 0;
+                        newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * monthsBetweenDates * (-1);}
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0;
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice) * 100;}
+                   }
+             newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+             System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);	
+             // newObj.DefaultSubscriptionTerm__c = 1;
+             newObj.SubscriptionTerm__c = oppProdObj.TERM_C__c;
+             newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+             newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+         	 //newObj.SubscriptionPricing__c = 'Fixed Price';
+             newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         	 //newObj.BillingFrequency__c = 'Annual';
+             newObj.ChargeType__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c == LICENSES_PRODUCT_CATEGORY ? 'Recurring' :'One-Time';
+             newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+             System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+             System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+             System.debug('Old Disc Price:'+oldDiscPrice);
+        	 System.debug('Disc Price Per Unit:'+discPricePerUnit);
+          	 //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+           
+             newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+             newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+             //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;//newObj.List_Unit_Price__c = oppProdObj.LISTPRICE__c;
+             newObj.Start_Date__c = oppProdObj.START_DATE_C__c;
+             newObj.End_Date__c = oppProdObj.END_DATE_C__c;
+             //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+             System.debug('Single Year Start Date:'+oppProdObj.START_DATE_C__c);
+               System.debug('Single Year End Date:'+ oppProdObj.END_DATE_C__c);
+            // System.debug('Single Year '+':additionalDiscAmount: '+ additionalDiscAmount);
+             forInsert.add(newObj); 
+         }
+     }*/
+         
+     }
+     if(forInsert.size()>0)
+         Database.insert(forInsert);
+ 
+ }
+
+ //Split logic for Non-Ammendment records
+    
+ //public static void splitLogicForCPQOLD( List<dm_OpportunityProducts__c> oppProdsExcel)
+ {/*
+     //Split only Licenses products (PC_1_C__c) and Preserve other products without splitting but with AdditionalDisc calculation
+     System.debug('oppProdsExcel Count:'+oppProdsExcel.size());
+     List<dm_Split_ForQLImport__c> forInsert = new List<dm_Split_ForQLImport__c>();
+     Map<Id,List<dm_OpportunityProducts__c>> prodToOppProdMap = new  Map<Id,List<dm_OpportunityProducts__c>>();
+   	 //Get theCurrent PriceBook unit price for each opp prod
+   	 Map<Id,PriceBookEntry> oppProdWithPBPriceMap = new Map<Id,PriceBookEntry>();
+     //Get the Current Dimension for each prod
+   	 Map<Id,String > productToDimensionMap = new Map<Id,String>();
+     // Get the Unique Products and it's Price book details 
+   	 for(dm_OpportunityProducts__c oppProd :oppProdsExcel)
+     {
+        // if(prodToOppProdMap.containsKey(oppProd.PRODUCT2ID__c))
+         //prodToOppProdMap.get(oppProd.PRODUCT2ID__c).add(oppProd);
+         //else prodToOppProdMap.put(oppProd.PRODUCT2ID__c,new List<dm_OpportunityProducts__c>{oppProd});
+         if(prodToOppProdMap.containsKey(oppProd.dm_ProductId_New__c))
+         prodToOppProdMap.get(oppProd.dm_ProductId_New__c).add(oppProd);
+         else prodToOppProdMap.put(oppProd.dm_ProductId_New__c,new List<dm_OpportunityProducts__c>{oppProd});
+         
+     }
+    //Price Book Entries
+     Id pbId = [Select Id from PriceBook2 where Name = 'Standard Price Book'].Id;
+     List<PricebookEntry> pbEntries = [SELECT PriceBookEntryId__c,Product2.Name, Pricebook2Id, Product2Id,Product2.PC_1__c, UnitPrice FROM PricebookEntry 
+                                   where Pricebook2Id = :pbId and Product2Id in :prodToOppProdMap.keySet()];
+    //Get the Unit Proce for each product
+     for(PricebookEntry pbe : pbEntries)
+     {
+         if(prodToOppProdMap.containsKey(pbe.Product2Id))
+         {
+             List<dm_OpportunityProducts__c> temp = prodToOppProdMap.get(pbe.Product2Id);
+             if(temp.size()>0)
+             {
+                 for(dm_OpportunityProducts__c obj :temp)
+                 {
+                    oppProdWithPBPriceMap.put(obj.Id,pbe);
+                 }
+             }
+         
+         }
+     }
+     //Price Dimension
+     List<SBQQ__Dimension__c> dimensions = [SELECT Id,Name,SBQQ__PriceBook__c, SBQQ__PriceEditable__c, SBQQ__Product__c, 
+                                       SBQQ__UnitPrice__c FROM SBQQ__Dimension__c where 
+                                            SBQQ__Product__c in : prodToOppProdMap.keySet() ];
+     //Map the Product with Dimention
+     for(SBQQ__Dimension__c dimen : dimensions) 
+     {
+         if(prodToOppProdMap.containsKey(dimen.SBQQ__Product__c))
+         productToDimensionMap.put(dimen.SBQQ__Product__c,dimen.Id);
+     }
+     for(dm_OpportunityProducts__c oppProdObj : oppProdsExcel)
+     {
+         //obj.Order_Start_Date__c
+         //obj.Order_End_Date__c
+         //obj.Term__c
+         Integer term = Integer.valueOf(Math.ceil(oppProdObj.TERM_C__c));//Round off to the lowest value e.g 28.9 means 28
+		 Integer YEAR = 12; 
+         Integer loopCount = term/YEAR ;//Get the Integer value
+         //Get the Mod value , that should be added to the last date's month 
+         //E.g 25 months = 12 months for 2 years and one month for last one.
+         Integer modValue = Math.mod(term,YEAR);
+         Date startDate = oppProdObj.START_DATE_C__c;
+         Date endDate = oppProdObj.END_DATE_C__c;
+         Date startDateFromLoop = null;
+         Date endDateFromLoop = null;
+         System.debug('Start Date:'+oppProdObj.START_DATE_C__c+'  End Date: '+oppProdObj.END_DATE_C__c);
+         //Calculate the Additional Disc
+         System.debug('modValue:'+modValue);
+         System.debug('loopCount:'+loopCount);
+         System.debug('Term__c:'+oppProdObj.TERM_C__c);
+         System.debug('Quantity:'+oppProdObj.QUANTITY__c);
+         System.debug('Opp Prod Total Price:'+oppProdObj.TOTALPRICE__c); 
+         System.debug('Price Book Val:'+oppProdWithPBPriceMap.get(oppProdObj.Id)); 
+         Decimal defPriceBasedonPB = 0;//(oppProdWithPBPriceMap.get(oppProdObj.Id)) * oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c;
+         String dimension = productToDimensionMap.get(oppProdObj.dm_ProductId_New__c);
+         //oppProd.PRODUCT_NAME_C__c Mavenlink Enterprise License-CPQ ='01t78000000tzvrAAA' 
+         // Edition: Custom Integration-CPQ = '01t78000000tzxqAAA'
+         //Edition: Jira-CPQ = 01t78000000tzwSAAQ 
+         //Decimal matchedPrice = defPriceBasedonPB - additionalDiscAmount;
+         //System.debug('matchedPrice:'+matchedPrice);
+         //Get the Order Date Difference to verify the term -Sometimes the dates are b/w year and the term is 36
+         //Add Licenses product category check- to split only those records.
+        //////TTTTTTTTTTTTTTTTTTOOOOOOOOOOOOOOOOOOOO- Enable INSERT&&&&&&&&&&&&&&&&&&&&&&&&&&&&&%%%%%%%%%%%%%%%%%%%%%
+         if('Account Credit - Licenses-CPQ' == oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.Name)
+         {System.debug('Product Err:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c);
+          System.debug('Product Err Name:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.Name);}
+         //System.debug('Product Err:'+oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c);
+         if(loopCount > 0 && startDate.monthsBetween(endDate) > 12 && oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c == LICENSES_PRODUCT_CATEGORY)//oppProdObj.PC_1_C__c == LICENSES_PRODUCT_CATEGORY )
+         {
+           //Create the Split Records for the QL
+           for(Integer i=0;i< loopCount ;i++)  
+           {
+               if(i == 0){
+               Date newStartDate = Date.newInstance(startDate.year(), startDate.month(), startDate.day());
+               Date newEndDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()-1);
+               System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+                newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         		Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         		Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         		Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         		//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;//YEAR * oppProdObj.QUANTITY__c * discPricePerUnit;
+                Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+                System.debug('Old Disc Price:'+oldDiscPrice);
+         		System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		//System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+                System.debug(' oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice); 
+                if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                   else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                        //newObj.Discount__c = 0;
+                       }
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                        //newObj.AdditionalDiscAmountTemp__c = 0;
+                       }
+                   }
+         		System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                newObj.BillingType__c = 'Advance';
+                newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                newObj.Opportunity_Product__c = oppProdObj.Id;
+                newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+                newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+                newObj.DefaultSubscriptionTerm__c = 1;
+         		newObj.SubscriptionTerm__c = YEAR;
+         		newObj.SubscriptionPricing__c = 'Fixed Price';
+         		newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         		//newObj.BillingFrequency__c = 'Annual';
+                newObj.ChargeType__c = 'Recurring';
+                newObj.Dimension__c = dimension;
+                newObj.SegmentLabel__c = 'Year '+(i+1);
+                newObj.SegmentIndex__c = i+1;
+                newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+         		newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+                newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+                //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;
+                //newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+                newObj.Start_Date__c = newStartDate;
+                newObj.End_Date__c = newEndDate;
+                //newObj.Opportunity_Product__c = oppProdObj.Id;//OPPPRODID_C__c;
+               //System.debug('Loop '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               forInsert.add(newObj);     
+               }
+               else{
+                   if(startDateFromLoop == null){
+                       Date newStartDate = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day());
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       //System.debug('Loop null'+i+':Start Date: '+ newStartDate);
+               		   //System.debug('Loop null'+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       System.debug('Loop null'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   System.debug('Loop null'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                        dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+                        newObj.BillingType__c = 'Advance';
+                        newObj.Opportunity_Product__c = oppProdObj.Id;
+                        newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+            		    newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+               		    newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               			newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               			newObj.Quantity__c = oppProdObj.QUANTITY__c;
+                        newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                        newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+              		    //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               		    //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+                       Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         				Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         				Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         				Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         				//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;// YEAR * oppProdObj.QUANTITY__c * discPricePerUnit;
+                       Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                		newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                		if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                		{
+                    		newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    		//newObj.Discount__c = 0;
+                		}
+                   		else {
+                      		 if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                             {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                              //newObj.Discount__c = 0;
+                             }
+                      		 else 
+                        	//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                        	newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                            //newObj.AdditionalDiscAmountTemp__c = 0;
+                   		}
+                       newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                       System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+                       System.debug('Old Disc Price:'+oldDiscPrice);
+         		       System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         		       //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         				//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+         				System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				//newObj.BillingFrequency__c = 'Annual';
+                        newObj.ChargeType__c = 'Recurring';
+                        newObj.Dimension__c = dimension;
+                        newObj.SegmentLabel__c = 'Year '+(i+1);
+                        newObj.SegmentIndex__c = i+1;
+                        newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+                        newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               			newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               			//newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;
+               			//newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               			newObj.Start_Date__c = newStartDate;
+               			newObj.End_Date__c = newEndDate;
+                        //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+                      // System.debug('Loop null '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               			forInsert.add(newObj);     
+                   }
+                   else{
+                        //System.debug('Loop before'+i+':startDateFromLoop: '+ startDateFromLoop);
+               		   //System.debug('Loop before'+i+':endDateFromLoop: '+ endDateFromLoop);//startDate.addYears(i+1));
+                       Date newStartDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month(),endDateFromLoop.day()+1);
+               		   Date newEndDate = Date.newInstance(newStartDate.year(), newStartDate.month()+YEAR,newStartDate.day()-1);
+               		   startDateFromLoop = newStartDate;
+                       endDateFromLoop = newEndDate;
+                       System.debug('Loop '+i+':Start Date: '+ newStartDate);
+               		   System.debug('Loop '+i+':End Date: '+ newEndDate);//startDate.addYears(i+1));
+                       dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+                       newObj.BillingType__c = 'Advance';
+                       newObj.Opportunity_Product__c = oppProdObj.Id;
+                       newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+            		   newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+                       newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               		   newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               		   newObj.Quantity__c = oppProdObj.QUANTITY__c;
+                       newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+                       newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+                       Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+                       newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/YEAR : 0;
+                		//newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+         				System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				//newObj.BillingFrequency__c = 'Annual';
+               		   //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               			//{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+				        Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+         				Decimal originalSalePriceForQL = perMonthCost * YEAR;
+         				Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         				Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         				//Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*YEAR;//YEAR * oppProdObj.QUANTITY__c * discPricePerUnit; 
+                                      			System.debug('Old Disc Price:'+oldDiscPrice);
+                       System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+         				System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         				//System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         				newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               			newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               			//newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;//newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c * YEAR;
+               		   newObj.Start_Date__c = newStartDate;
+               		   newObj.End_Date__c = newEndDate;
+                       //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+                       System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+                       newObj.DefaultSubscriptionTerm__c = 1;
+         				newObj.SubscriptionTerm__c = YEAR;
+         				newObj.SubscriptionPricing__c = 'Fixed Price';
+         				newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         				newObj.BillingFrequency__c = 'Annual';
+                        newObj.ChargeType__c = 'Recurring';
+                        newObj.Dimension__c = dimension;
+                        newObj.SegmentLabel__c = 'Year '+(i+1);
+                        newObj.SegmentIndex__c = i+1;
+                        newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+                       if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                		{
+                    		newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                    		//newObj.Discount__c = 0;
+               			 }
+                  	 else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * YEAR * (-1);
+                        //newObj.Discount__c = 0;
+                       }
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0;
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;}
+                   }
+                   newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+                       //System.debug('Loop '+i+':additionalDiscAmount: '+ additionalDiscAmount);
+               		   forInsert.add(newObj);  
+                   }
+               
+               
+               }
+           }
+           if(modValue != null && modValue > 0)
+           {
+                Date newStartDate = null;
+               if(endDateFromLoop == null){
+                       newStartDate = endDateFromLoop = Date.newInstance(startDate.year(), startDate.month()+YEAR,startDate.day()+1);
+               }
+               else 
+               newStartDate = endDateFromLoop+1;//Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month()+modValue,0);
+               Date newEndDate = Date.newInstance(endDateFromLoop.year(), endDateFromLoop.month()+modValue,endDateFromLoop.day());//+1);
+			   System.debug('Mod '+':Start Date: '+newStartDate);
+               System.debug('Mod '+':End Date: '+ newEndDate);
+               dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+               newObj.BillingType__c = 'Advance';
+               newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+               newObj.Quote__c = oppProdObj.Quote_Temp__c;
+               newObj.Quantity__c = oppProdObj.QUANTITY__c;
+               newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+               newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+               //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+               //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+               Decimal perMonthCost =  oppProdObj.TOTALPRICE__c/oppProdObj.TERM_C__c;
+               Decimal originalSalePriceForQL = perMonthCost * modValue;
+         	   Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+        	   Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+        	   //Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c)*modValue;//modValue * oppProdObj.QUANTITY__c * discPricePerUnit; 
+               Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+               newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//withSalesPrice >0 ? withSalesPrice/modValue : 0;
+               if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * modValue * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {//newObj.Discount__c = 0;
+                        newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * modValue * (-1);}
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0; 
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;}
+                   }
+                newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+               System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);
+               newObj.Opportunity_Product__c = oppProdObj.Id;
+               newObj.DefaultSubscriptionTerm__c = 1;
+         		newObj.SubscriptionTerm__c = modValue;
+         		newObj.SubscriptionPricing__c = 'Fixed Price';
+         		newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         		//newObj.BillingFrequency__c = 'Annual';
+               newObj.ChargeType__c = 'Recurring';
+               newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+               newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+               newObj.Dimension__c = dimension;
+               newObj.SegmentLabel__c = 'Year '+(loopCount+1);
+               newObj.SegmentIndex__c = loopCount+1;
+               newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+               System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+               System.debug('Old Disc Price:'+oldDiscPrice);
+         	   System.debug('Disc Price Per Unit:'+discPricePerUnit);
+         	   //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+         
+               newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+               newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+               //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;// newObj.List_Unit_Price__c = oppProdObj.MONTHLY_RECURRING_REVENUE_C__c;// * (oppProdObj.TERM_C__c-(loopCount * YEAR));
+       		   newObj.Start_Date__c = newStartDate;
+       		   newObj.End_Date__c = newEndDate;
+               //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+               //System.debug('Mod '+':additionalDiscAmount: '+ additionalDiscAmount);
+      		   forInsert.add(newObj);  
+           }
+         }
+         else
+         {
+             //Nomultiple year, lesser than 12 - single year or Services Product
+             Integer monthsBetweenDates = startDate.monthsBetween(endDate);
+             dm_Split_ForQLImport__c newObj = new dm_Split_ForQLImport__c();
+             newObj.Opportunity_Product__c = oppProdObj.Id;
+             newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+             newObj.Product__c = oppProdObj.dm_ProductId_New__c;
+             newObj.Quote__c = oppProdObj.Quote_Temp__c;
+             newObj.Quantity__c = oppProdObj.QUANTITY__c;
+             newObj.SubscriptionTerm__c = oppProdObj.Subscription_Term__c;
+             newObj.CurrentPriceFromPBTemp__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;
+             //if(oppProdWithPBPriceMap.containsKey(oppProdObj.Id))
+             //{//CurrentPriceFromPBTemp__c,OldDiscountPrice_Temp__c,DiscPriceAppliedPerUnitTemp__c,AdditionalDiscAmountTemp__c
+             Decimal perMonthCost =  monthsBetweenDates ==0 ? 0 : oppProdObj.TOTALPRICE__c/monthsBetweenDates;
+         	 Decimal originalSalePriceForQL = monthsBetweenDates ==0 ? 0 : perMonthCost * monthsBetweenDates;
+         	 Decimal oldDiscPrice = perMonthCost/oppProdObj.QUANTITY__c;
+         	 Decimal discPricePerUnit = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice -oldDiscPrice;
+         	 //Decimal additionalDiscAmount = (oppProdObj.DISCOUNT_AMOUNT_C__c/oppProdObj.TERM_C__c) * monthsBetweenDates;//monthsBetweenDates * oppProdObj.QUANTITY__c * discPricePerUnit; 
+             //Decimal withSalesPrice = oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c * oppProdObj.TERM_C__c;
+               newObj.List_Unit_Price__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice;//oppProdObj.LICENSE_PRICE_C__c * oppProdObj.QUANTITY__c ;
+             if(oppProdObj.dm_Product_Name_New__c == 'Free Months-CPQ')
+                {
+                    newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * monthsBetweenDates * (-1);
+                    //newObj.Discount__c = 0;
+                }
+                   else {
+                       if(oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00)
+                       {//newObj.Discount__c = 0;
+                        newObj.AdditionalDiscAmountTemp__c = oppProdObj.LICENSE_PRICE_C__c * monthsBetweenDates * (-1);}
+                       else 
+                        //newObj.Discount__c = oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice == 0.00 ? oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice : ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice)*100;
+                       {//newObj.AdditionalDiscAmountTemp__c = 0;
+                        newObj.Discount__c = ((oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice - oppProdObj.LICENSE_PRICE_C__c)/oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice) * 100;}
+                   }
+             newObj.TotalPrice__c = oppProdObj.TOTALPRICE__c;
+             System.debug('PB Price:'+ oppProdWithPBPriceMap.get(oppProdObj.Id).UnitPrice + 'License Price :'+oppProdObj.LICENSE_PRICE_C__c);	
+             // newObj.DefaultSubscriptionTerm__c = 1;
+             newObj.SubscriptionTerm__c = oppProdObj.TERM_C__c;
+             newObj.LicensePrice__c = oppProdObj.LICENSE_PRICE_C__c;
+             newObj.ZuoraListPrice__c = oppProdObj.LISTPRICE__c;
+         	 //newObj.SubscriptionPricing__c = 'Fixed Price';
+             newObj.PricebookEntryId__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Id;
+         	 //newObj.BillingFrequency__c = 'Annual';
+             newObj.ChargeType__c = oppProdWithPBPriceMap.get(oppProdObj.Id).Product2.PC_1__c == LICENSES_PRODUCT_CATEGORY ? 'Recurring' :'One-Time';
+             newObj.dm_Opp_Prod_Count_for_Opp__c = oppProdObj.dm_Opp_Prod_Count_for_Opp__c;
+             System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+             System.debug('Price Book Price:'+oppProdWithPBPriceMap.get(oppProdObj.Id));
+             System.debug('Old Disc Price:'+oldDiscPrice);
+        	 System.debug('Disc Price Per Unit:'+discPricePerUnit);
+          	 //System.debug('additionalDiscAmount = oppProdObj.TERM_C__c * oppProdObj.QUANTITY__c * discPricePerUnit=======:'+ additionalDiscAmount);
+           
+             newObj.OldDiscountPrice_Temp__c = oldDiscPrice;
+             newObj.DiscPriceAppliedPerUnitTemp__c = discPricePerUnit;
+             //newObj.AdditionalDiscAmountTemp__c = additionalDiscAmount;//newObj.List_Unit_Price__c = oppProdObj.LISTPRICE__c;
+             newObj.Start_Date__c = oppProdObj.START_DATE_C__c;
+             newObj.End_Date__c = oppProdObj.END_DATE_C__c;
+             //newObj.Opportunity_Product__c = oppProdObj.OPPPRODID_C__c;
+             System.debug('Single Year Start Date:'+oppProdObj.START_DATE_C__c);
+               System.debug('Single Year End Date:'+ oppProdObj.END_DATE_C__c);
+            // System.debug('Single Year '+':additionalDiscAmount: '+ additionalDiscAmount);
+             forInsert.add(newObj); 
+         }
+     }
+     if(forInsert.size()>0)
+         Database.insert(forInsert);
+ 
+*/ }
+   // The batch job finishes
+  public void finish(Database.BatchableContext bc){ }
+}
+@isTest
+public class dm_QLSplitBatchNonAmendmentTest {
+@isTest
+    public static void setup1(){
+        
+         //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        List<Account> accId = [Select ID from Account where Name = 'Test Account' Limit 1];
+        
+        // Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        objOpportunity.Start_Date__c=system.today();
+        objOpportunity.End_Date__c=system.today()+30;
+        insert objOpportunity;
+        List<Opportunity> oppId = [Select ID,Name from Opportunity where Name = 'Test Opportunity'  Limit 1];
+        
+       
+        
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'Licenses',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        objProduct.PC_1__c = 'Licenses';
+        insert objProduct;
+       	
+        Product2 objProduct1 = TestDataUtility.createProduct(
+            'Service Product',
+            true,
+            'Quantity',
+            'Services',
+            'Licenses',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            6,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        objProduct1.PC_1__c = 'Licenses';
+        insert objProduct1;
+        
+        Id pricebookId = Test.getStandardPricebookId();
+       
+        // PriceBookEntry Creation 
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            pricebookId,
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+		
+		// PriceBookEntry Creation 
+        PriceBookEntry objPriceBookEntry1 = TestDataUtility.createpriceBookEntry(
+            pricebookId,
+            objProduct1.Id,
+            1000.00,
+            True
+        );
+        insert objPriceBookEntry1;
+        
+        Pricebook2 standardPriceBook = new Pricebook2(Name='Standard Price Book',IsActive = true);
+        
+        insert standardPriceBook;
+        
+       PricebookEntry customPrice = new PricebookEntry(
+            Pricebook2Id = standardPriceBook.Id, Product2Id = objProduct.Id,
+            UnitPrice = 100000, IsActive = true);
+        
+        insert customPrice; 
+        
+       PricebookEntry customPrice1 = new PricebookEntry(
+            Pricebook2Id = standardPriceBook.Id, Product2Id = objProduct1.Id,
+            UnitPrice = 100000, IsActive = true);
+        
+        insert customPrice1;  
+        
+        // Quote Creation
+        SBQQ__Quote__c objQuote1 = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        insert objQuote1;
+        
+        // Quote Creation
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.DM_Quote__c = True;
+        objQuote.Manual_Fix__c = true;
+        objQuote.SBQQ__Source__c =objQuote1.Id ;
+        objQuote.SBQQ__Opportunity2__c = objOpportunity.Id;
+        objQuote.SBQQ__SubscriptionTerm__c = 24;
+        objQuote.Dm_Check__c = true;
+        
+        insert objQuote;
+		
+		
+        
+        //Price Dimension
+        SBQQ__Dimension__c objdim = new SBQQ__Dimension__c();
+        objdim.Name = 'Test Dim';
+        objdim.SBQQ__PriceBook__c = standardPriceBook.Id;
+        objdim.SBQQ__UnitPrice__c = 1000;
+        objdim.SBQQ__Product__c=objProduct.Id;
+        objdim.SBQQ__QuantityEditable__c= 'Inherit';
+        objdim.SBQQ__Type__c='Year';
+        objdim.SBQQ__PriceEditable__c= 'Inherit';
+        objdim.SBQQ__NonPartnerDiscountable__c='Inherit';
+        objdim.SBQQ__CostEditable__c='Inherit';
+        objdim.SBQQ__Taxable__c='Inherit';
+        objdim.SBQQ__UnitPrice__c=1000;
+      	insert objdim;
+        
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            customPrice.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+        
+        //Contract
+         Contract objContract = new Contract(
+            Status = 'Draft',
+            StartDate = objQuote.SBQQ__StartDate__c,
+            EndDate = objQuote.SBQQ__EndDate__c,
+            ContractTerm = 24,
+            AccountId = objQuote.SBQQ__Account__c, //objAccount.Id,
+            SBQQ__Opportunity__c = objQuote.SBQQ__Opportunity2__c, //objOpportunity.Id,
+            SBQQ__Quote__c = objQuote.Id
+        );
+    	objContract.Name = 'Test';
+         insert objContract;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+        
+        
+        //dm_OpportunityProducts__c creation 
+        dm_OpportunityProducts__c ObjdmOppProduct = new dm_OpportunityProducts__c();
+        ObjdmOppProduct.OPPORTUNITYID__c = oppId[0].Id;
+        ObjdmOppProduct.ACCOUNT_ID_C__c  = accId[0].Id;
+        ObjdmOppProduct.START_DATE_C__c = Date.newInstance(2024,07, 01);
+        ObjdmOppProduct.END_DATE_C__c = date.newInstance(2027,06,30);
+        ObjdmOppProduct.CONTRACT_ID_NEW_C__c=objContract.Id;
+        ObjdmOppProduct.Subscription_Term__c=36;
+        ObjdmOppProduct.OPPORTUNITY_NAME_C__c = oppId[0].Name;
+        ObjdmOppProduct.PRODUCT_NAME_C__c=objProduct.Name;
+        ObjdmOppProduct.PC_1_C__c = objProduct.PC_1__c;
+        ObjdmOppProduct.TERM_C__c=37;
+        ObjdmOppProduct.LISTPRICE__c=15750.0000;
+        ObjdmOppProduct.LICENSE_PRICE_C__c=14000.00;
+        ObjdmOppProduct.OPPPRODID_C__c=oppId[0].Id;
+        ObjdmOppProduct.PRODUCT2ID__c=objProduct.Id;
+        ObjdmOppProduct.QUANTITY__c=1.0000;
+        ObjdmOppProduct.MONTHLY_RECURRING_REVENUE_C__c=400;
+        ObjdmOppProduct.dm_Opp_Prod_Count_for_Opp__c=1;
+        ObjdmOppProduct.dm_Product_Name_New__c='Free Months-CPQ';
+        ObjdmOppProduct.dm_ProductId_New__c=objProduct.Id;
+        ObjdmOppProduct.Quote_Temp__c=objQuote.id;
+        ObjdmOppProduct.DISCOUNT_AMOUNT_C__c=0.00;
+        ObjdmOppProduct.TOTALPRICE__c=14000.0000;
+        ObjdmOppProduct.Opportunity_Temp__c=objOpportunity.Id;
+
+         insert ObjdmOppProduct;
+		
+		
+        //dm_Split_ForQLImport__c Creation
+        dm_Split_ForQLImport__c ObjdmSplitforQl = new dm_Split_ForQLImport__c();
+        ObjdmSplitforQl.Quote__c = objQuote1.Id;
+        ObjdmSplitforQl.Product__c = objProduct.Id;
+        ObjdmSplitforQl.Opportunity_Product__c = 'aEb780000004lLBCAY';
+        ObjdmSplitforQl.SegmentKey__c = 'Ql1';
+        ObjdmSplitforQl.Number__c = 1;
+        ObjdmSplitforQl.ChargeType__c = 'Recurring';
+        insert ObjdmSplitforQl;
+        
+        test.startTest();
+        dm_QLSplitBatchNonAmendmentOppTypes bc = new dm_QLSplitBatchNonAmendmentOppTypes();
+        Id batchId = Database.executeBatch(bc);
+        test.stopTest();
+}
+@isTest
+    public static void setup4(){
+        
+         //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        List<Account> accId = [Select ID from Account where Name = 'Test Account' Limit 1];
+        
+        // Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        objOpportunity.Start_Date__c=system.today();
+        objOpportunity.End_Date__c=system.today()+30;
+        insert objOpportunity;
+        List<Opportunity> oppId = [Select ID,Name from Opportunity where Name = 'Test Opportunity'  Limit 1];
+        
+       
+        
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'Licenses',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            7,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        objProduct.PC_1__c = 'Licenses';
+        insert objProduct;
+       	
+        Product2 objProduct1 = TestDataUtility.createProduct(
+            'Service Product',
+            true,
+            'Quantity',
+            'Services',
+            'Licenses',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+           7,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        objProduct1.PC_1__c = 'Licenses';
+        insert objProduct1;
+        
+        Id pricebookId = Test.getStandardPricebookId();
+       
+        // PriceBookEntry Creation 
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            pricebookId,
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+		
+		// PriceBookEntry Creation 
+        PriceBookEntry objPriceBookEntry1 = TestDataUtility.createpriceBookEntry(
+            pricebookId,
+            objProduct1.Id,
+            1000.00,
+            True
+        );
+        insert objPriceBookEntry1;
+        
+        Pricebook2 standardPriceBook = new Pricebook2(Name='Standard Price Book',IsActive = true);
+        
+        insert standardPriceBook;
+        
+       PricebookEntry customPrice = new PricebookEntry(
+            Pricebook2Id = standardPriceBook.Id, Product2Id = objProduct.Id,
+            UnitPrice = 100000, IsActive = true);
+        
+        insert customPrice; 
+        
+       PricebookEntry customPrice1 = new PricebookEntry(
+            Pricebook2Id = standardPriceBook.Id, Product2Id = objProduct1.Id,
+            UnitPrice = 100000, IsActive = true);
+        
+        insert customPrice1;  
+        
+        // Quote Creation
+        SBQQ__Quote__c objQuote1 = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            7,
+            date.today(),
+            date.today().addMonths(7),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        insert objQuote1;
+        
+        // Quote Creation
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            7,
+            date.today(),
+            date.today().addMonths(7),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.DM_Quote__c = True;
+        objQuote.Manual_Fix__c = true;
+        objQuote.SBQQ__Source__c =objQuote1.Id ;
+        objQuote.SBQQ__Opportunity2__c = objOpportunity.Id;
+        objQuote.SBQQ__SubscriptionTerm__c = 7;
+        objQuote.Dm_Check__c = true;
+        
+        insert objQuote;
+		
+		
+        
+        //Price Dimension
+        SBQQ__Dimension__c objdim = new SBQQ__Dimension__c();
+        objdim.Name = 'Test Dim';
+        objdim.SBQQ__PriceBook__c = standardPriceBook.Id;
+        objdim.SBQQ__UnitPrice__c = 1000;
+        objdim.SBQQ__Product__c=objProduct.Id;
+        objdim.SBQQ__QuantityEditable__c= 'Inherit';
+        objdim.SBQQ__Type__c='Year';
+        objdim.SBQQ__PriceEditable__c= 'Inherit';
+        objdim.SBQQ__NonPartnerDiscountable__c='Inherit';
+        objdim.SBQQ__CostEditable__c='Inherit';
+        objdim.SBQQ__Taxable__c='Inherit';
+        objdim.SBQQ__UnitPrice__c=1000;
+      	insert objdim;
+        
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            customPrice.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(7)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+        
+        //Contract
+         Contract objContract = new Contract(
+            Status = 'Draft',
+            StartDate = objQuote.SBQQ__StartDate__c,
+            EndDate = objQuote.SBQQ__EndDate__c,
+            ContractTerm = 7,
+            AccountId = objQuote.SBQQ__Account__c, //objAccount.Id,
+            SBQQ__Opportunity__c = objQuote.SBQQ__Opportunity2__c, //objOpportunity.Id,
+            SBQQ__Quote__c = objQuote.Id
+        );
+    	objContract.Name = 'Test';
+         insert objContract;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(7),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+        
+        
+        //dm_OpportunityProducts__c creation 
+        dm_OpportunityProducts__c ObjdmOppProduct = new dm_OpportunityProducts__c();
+        ObjdmOppProduct.OPPORTUNITYID__c = oppId[0].Id;
+        ObjdmOppProduct.ACCOUNT_ID_C__c  = accId[0].Id;
+        ObjdmOppProduct.START_DATE_C__c = Date.newInstance(2024,08, 01);
+        ObjdmOppProduct.END_DATE_C__c = date.newInstance(2025,03,31);
+        ObjdmOppProduct.CONTRACT_ID_NEW_C__c=objContract.Id;
+        ObjdmOppProduct.Subscription_Term__c=7;
+        ObjdmOppProduct.OPPORTUNITY_NAME_C__c = oppId[0].Name;
+        ObjdmOppProduct.PRODUCT_NAME_C__c=objProduct.Name;
+        ObjdmOppProduct.PC_1_C__c = objProduct.PC_1__c;
+        ObjdmOppProduct.TERM_C__c=7;
+        ObjdmOppProduct.LISTPRICE__c=15750.0000;
+        ObjdmOppProduct.LICENSE_PRICE_C__c=14000.00;
+        ObjdmOppProduct.OPPPRODID_C__c=oppId[0].Id;
+        ObjdmOppProduct.PRODUCT2ID__c=objProduct.Id;
+        ObjdmOppProduct.QUANTITY__c=1.0000;
+        ObjdmOppProduct.MONTHLY_RECURRING_REVENUE_C__c=400;
+        ObjdmOppProduct.dm_Opp_Prod_Count_for_Opp__c=1;
+        ObjdmOppProduct.dm_Product_Name_New__c='Free Months-CPQ';
+        ObjdmOppProduct.dm_ProductId_New__c=objProduct.Id;
+        ObjdmOppProduct.Quote_Temp__c=objQuote.id;
+        ObjdmOppProduct.DISCOUNT_AMOUNT_C__c=0.00;
+        ObjdmOppProduct.TOTALPRICE__c=14000.0000;
+        ObjdmOppProduct.Opportunity_Temp__c=objOpportunity.Id;
+
+         insert ObjdmOppProduct;
+		
+		
+        //dm_Split_ForQLImport__c Creation
+        dm_Split_ForQLImport__c ObjdmSplitforQl = new dm_Split_ForQLImport__c();
+        ObjdmSplitforQl.Quote__c = objQuote1.Id;
+        ObjdmSplitforQl.Product__c = objProduct.Id;
+        ObjdmSplitforQl.Opportunity_Product__c = 'aEb780000004lLBCAY';
+        ObjdmSplitforQl.SegmentKey__c = 'Ql1';
+        ObjdmSplitforQl.Number__c = 1;
+        ObjdmSplitforQl.ChargeType__c = 'Recurring';
+        insert ObjdmSplitforQl;
+        
+        test.startTest();
+        dm_QLSplitBatchNonAmendmentOppTypes bc = new dm_QLSplitBatchNonAmendmentOppTypes();
+        Id batchId = Database.executeBatch(bc);
+        test.stopTest();
+}
+@isTest
+    public static void setup2(){
+        
+         //Account Creation
+        Account objAccount = TestDataUtility.createAccount(
+            'Test Account'
+        );
+        insert objAccount;
+        List<Account> accId = [Select ID from Account where Name = 'Test Account' Limit 1];
+        
+        // Opportunity Creation
+        Opportunity objOpportunity = TestDataUtility.createOpportunity(
+            'Test Opportunity',
+            objAccount.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        objOpportunity.Start_Date__c=system.today();
+        objOpportunity.End_Date__c=system.today()+30;
+        objOpportunity.RecordTypeId = '012i0000000xfHrAAI';
+        insert objOpportunity;
+        List<Opportunity> oppId = [Select ID,Name from Opportunity where Name = 'Test Opportunity'  Limit 1]; 
+        
+        // Product Creation
+        Product2 objProduct = TestDataUtility.createProduct(
+            'Test Product',
+            true,
+            'Quantity',
+            'Services',
+            'Licenses',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            24,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        objProduct.PC_1__c = 'Licenses';
+        insert objProduct;
+       	
+        Product2 objProduct1 = TestDataUtility.createProduct(
+            'Service Product',
+            true,
+            'Quantity',
+            'Services',
+            'Licenses',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            6,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        objProduct1.PC_1__c = 'Licenses';
+        insert objProduct1;
+        
+        Id pricebookId = Test.getStandardPricebookId();
+       
+        // PriceBookEntry Creation 
+        PriceBookEntry objPriceBookEntry = TestDataUtility.createpriceBookEntry(
+            pricebookId,
+            objProduct.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry;
+		
+		// PriceBookEntry Creation 
+        PriceBookEntry objPriceBookEntry1 = TestDataUtility.createpriceBookEntry(
+            pricebookId,
+            objProduct1.Id,
+            1000.00,
+            True
+        );
+        insert objPriceBookEntry1;
+        
+        Pricebook2 standardPriceBook = new Pricebook2(Name='Standard Price Book',IsActive = true);
+        
+        insert standardPriceBook;
+        
+       PricebookEntry customPrice = new PricebookEntry(
+            Pricebook2Id = standardPriceBook.Id, Product2Id = objProduct.Id,
+            UnitPrice = 100000, IsActive = true);
+        
+        insert customPrice; 
+        
+       PricebookEntry customPrice1 = new PricebookEntry(
+            Pricebook2Id = standardPriceBook.Id, Product2Id = objProduct1.Id,
+            UnitPrice = 100000, IsActive = true);
+        
+        insert customPrice1;  
+        
+        // Quote Creation
+        SBQQ__Quote__c objQuote1 = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        insert objQuote1;
+        
+        // Quote Creation
+        SBQQ__Quote__c objQuote = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            24,
+            date.today(),
+            date.today().addMonths(24),
+            objOpportunity.Id,
+            objAccount.Id,
+            'Draft'
+        ); 
+        objQuote.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote.DM_Quote__c = True;
+        objQuote.Manual_Fix__c = true;
+        objQuote.SBQQ__Source__c =objQuote1.Id ;
+        objQuote.SBQQ__Opportunity2__c = objOpportunity.Id;
+        objQuote.SBQQ__SubscriptionTerm__c = 24;
+        objQuote.Dm_Check__c = true;
+        insert objQuote;
+		
+		
+        
+        //Price Dimension
+        SBQQ__Dimension__c objdim = new SBQQ__Dimension__c();
+        objdim.Name = 'Test Dim';
+        objdim.SBQQ__PriceBook__c = standardPriceBook.Id;
+        objdim.SBQQ__UnitPrice__c = 1000;
+        objdim.SBQQ__Product__c=objProduct.Id;
+        objdim.SBQQ__QuantityEditable__c= 'Inherit';
+        objdim.SBQQ__Type__c='Year';
+        objdim.SBQQ__PriceEditable__c= 'Inherit';
+        objdim.SBQQ__NonPartnerDiscountable__c='Inherit';
+        objdim.SBQQ__CostEditable__c='Inherit';
+        objdim.SBQQ__Taxable__c='Inherit';
+        objdim.SBQQ__UnitPrice__c=1000;
+      	insert objdim;
+        
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine = TestDataUtility.createCPQQuoteLine(
+            customPrice.Id,
+            1,
+            objQuote.Id,
+            3,
+            objProduct.Id,
+            Date.Today(),
+            Date.Today().AddMonths(24)
+        );
+        objQuoteLine.Free_Months__c = 3;
+        objQuoteLine.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine;
+        
+        //Contract
+         Contract objContract = new Contract(
+            Status = 'Draft',
+            StartDate = objQuote.SBQQ__StartDate__c,
+            EndDate = objQuote.SBQQ__EndDate__c,
+            ContractTerm = 24,
+            AccountId = objQuote.SBQQ__Account__c, //objAccount.Id,
+            SBQQ__Opportunity__c = objQuote.SBQQ__Opportunity2__c, //objOpportunity.Id,
+            SBQQ__Quote__c = objQuote.Id
+        );
+    	objContract.Name = 'Test';
+         insert objContract;
+        
+        // Order Creation
+        Order objOrder = TestDataUtility.createOrder(
+            objAccount.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(24),
+            '1',
+            'Net 15',
+            objQuote.Id,
+            objOpportunity.Id
+        );
+        insert objOrder;
+        
+        
+        //dm_OpportunityProducts__c creation 
+        dm_OpportunityProducts__c ObjdmOppProduct = new dm_OpportunityProducts__c();
+        ObjdmOppProduct.OPPORTUNITYID__c = oppId[0].Id;
+        ObjdmOppProduct.ACCOUNT_ID_C__c  = accId[0].Id;
+        ObjdmOppProduct.START_DATE_C__c = Date.newInstance(2024,07, 01);
+        ObjdmOppProduct.END_DATE_C__c = date.newInstance(2027,06,30);
+        ObjdmOppProduct.CONTRACT_ID_NEW_C__c=objContract.Id;
+        ObjdmOppProduct.Subscription_Term__c=36;
+        ObjdmOppProduct.OPPORTUNITY_NAME_C__c = oppId[0].Name;
+        ObjdmOppProduct.PRODUCT_NAME_C__c=objProduct.Name;
+        ObjdmOppProduct.PC_1_C__c = objProduct.PC_1__c;
+        ObjdmOppProduct.TERM_C__c=37;
+        ObjdmOppProduct.LISTPRICE__c=15750.0000;
+        ObjdmOppProduct.LICENSE_PRICE_C__c=14000.00;
+        ObjdmOppProduct.OPPPRODID_C__c=oppId[0].Id;
+        ObjdmOppProduct.PRODUCT2ID__c=objProduct.Id;
+        ObjdmOppProduct.QUANTITY__c=1.0000;
+        ObjdmOppProduct.MONTHLY_RECURRING_REVENUE_C__c=400;
+        ObjdmOppProduct.dm_Opp_Prod_Count_for_Opp__c=1;
+        ObjdmOppProduct.dm_Product_Name_New__c='Free Months-CPQ';
+        ObjdmOppProduct.dm_ProductId_New__c=objProduct.Id;
+        ObjdmOppProduct.Quote_Temp__c=objQuote.id;
+        ObjdmOppProduct.DISCOUNT_AMOUNT_C__c=0.00;
+        ObjdmOppProduct.TOTALPRICE__c=14000.0000;
+        ObjdmOppProduct.Opportunity_Temp__c=objOpportunity.Id;
+
+         insert ObjdmOppProduct;
+		
+		
+        //dm_Split_ForQLImport__c Creation
+        dm_Split_ForQLImport__c ObjdmSplitforQl = new dm_Split_ForQLImport__c();
+        ObjdmSplitforQl.Quote__c = objQuote1.Id;
+        ObjdmSplitforQl.Product__c = objProduct.Id;
+        ObjdmSplitforQl.Opportunity_Product__c = 'aEb780000004lLBCAY';
+        ObjdmSplitforQl.SegmentKey__c = 'Ql1';
+        ObjdmSplitforQl.Number__c = 1;
+        ObjdmSplitforQl.ChargeType__c = 'Recurring';
+        insert ObjdmSplitforQl;
+        
+
+        
+        test.startTest();
+        dm_QLSplitBatchNonAmendmentOppTypes bc = new dm_QLSplitBatchNonAmendmentOppTypes();
+        Id batchId = Database.executeBatch(bc);
+        test.stopTest();
+}
+@isTest
+    public static void setup3(){
+            
+         //Account Creation
+        Account objAccount1 = TestDataUtility.createAccount(
+            'Test Account1'
+        );
+        insert objAccount1;
+        List<Account> accId1 = [Select ID from Account where Name = 'Test Account1' Limit 1];
+        
+        // Opportunity Creation
+        Opportunity objOpportunity1 = TestDataUtility.createOpportunity(
+            'Test Opportunity1',
+            objAccount1.Id,
+            'Closed Won',
+            Date.Today().Adddays(30),
+            'New',
+            Test.getStandardPricebookId()
+        );
+        objOpportunity1.Start_Date__c=system.today();
+        objOpportunity1.End_Date__c=system.today()+30;
+        objOpportunity1.RecordTypeId = '012i0000000xfHrAAI';
+        insert objOpportunity1;
+        List<Opportunity> oppId1 = [Select ID,Name from Opportunity where Name = 'Test Opportunity1'  Limit 1]; 
+        
+        // Product Creation
+        Product2 objProduct2 = TestDataUtility.createProduct(
+            'Test Product2',
+            true,
+            'Quantity',
+            'Services',
+            'Licenses',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            7,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        objProduct2.PC_1__c = 'Licenses';
+        insert objProduct2;
+       	
+        Product2 objProduct3 = TestDataUtility.createProduct(
+            'Service Product',
+            true,
+            'Quantity',
+            'Services',
+            'Licenses',
+            'pc2',
+            'pc3',
+            'One-Time',
+            null,
+            'One-time',
+            7,
+            'Fixed Price',
+            'List',null ,null ,null 
+        );
+        objProduct3.PC_1__c = 'Licenses';
+        insert objProduct3;
+        
+        Id pricebookId1 = Test.getStandardPricebookId();
+       
+        // PriceBookEntry Creation 
+        PriceBookEntry objPriceBookEntry2 = TestDataUtility.createpriceBookEntry(
+            pricebookId1,
+            objProduct2.Id,
+            100000.00,
+            True
+        );
+        insert objPriceBookEntry2;
+		
+		// PriceBookEntry Creation 
+        PriceBookEntry objPriceBookEntry3 = TestDataUtility.createpriceBookEntry(
+            pricebookId1,
+            objProduct3.Id,
+            1000.00,
+            True
+        );
+        insert objPriceBookEntry3;
+        
+        Pricebook2 standardPriceBook1 = new Pricebook2(Name='Standard Price Book',IsActive = true);
+        
+        insert standardPriceBook1;
+        
+       PricebookEntry customPrice2 = new PricebookEntry(
+            Pricebook2Id = standardPriceBook1.Id, Product2Id = objProduct2.Id,
+            UnitPrice = 100000, IsActive = true);
+        
+        insert customPrice2; 
+        
+       PricebookEntry customPrice3 = new PricebookEntry(
+            Pricebook2Id = standardPriceBook1.Id, Product2Id = objProduct3.Id,
+            UnitPrice = 100000, IsActive = true);
+        
+        insert customPrice3;  
+        
+        // Quote Creation
+        SBQQ__Quote__c objQuote3 = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            7,
+            date.today(),
+            date.today().addMonths(7),
+            objOpportunity1.Id,
+            objAccount1.Id,
+            'Draft'
+        ); 
+        insert objQuote3;
+        
+        // Quote Creation
+        SBQQ__Quote__c objQuote2 = TestDataUtility.createCPQQuote(
+            true,
+            'Quote',
+            'ProductFamily__c',
+            'Annual',
+            'Front Load',
+            7,
+            date.today(),
+            date.today().addMonths(7),
+            objOpportunity1.Id,
+            objAccount1.Id,
+            'Draft'
+        ); 
+        objQuote2.SBQQ__BillingFrequency__c= 'Monthly';
+        objQuote2.DM_Quote__c = True;
+        objQuote2.Manual_Fix__c = true;
+        objQuote2.SBQQ__Source__c =objQuote3.Id ;
+        objQuote2.SBQQ__Opportunity2__c = objOpportunity1.Id;
+        objQuote2.SBQQ__SubscriptionTerm__c = 24;
+        objQuote2.Dm_Check__c = true;
+        insert objQuote2;
+		
+		
+        
+        //Price Dimension
+        SBQQ__Dimension__c objdim1 = new SBQQ__Dimension__c();
+        objdim1.Name = 'Test Dim';
+        objdim1.SBQQ__PriceBook__c = standardPriceBook1.Id;
+        objdim1.SBQQ__UnitPrice__c = 1000;
+        objdim1.SBQQ__Product__c=objProduct2.Id;
+        objdim1.SBQQ__QuantityEditable__c= 'Inherit';
+        objdim1.SBQQ__Type__c='Year';
+        objdim1.SBQQ__PriceEditable__c= 'Inherit';
+        objdim1.SBQQ__NonPartnerDiscountable__c='Inherit';
+        objdim1.SBQQ__CostEditable__c='Inherit';
+        objdim1.SBQQ__Taxable__c='Inherit';
+        objdim1.SBQQ__UnitPrice__c=1000;
+      	insert objdim1;
+        
+        // QuoteLine Creation
+        SBQQ__QuoteLine__c objQuoteLine1 = TestDataUtility.createCPQQuoteLine(
+            customPrice2.Id,
+            1,
+            objQuote2.Id,
+            3,
+            objProduct2.Id,
+            Date.Today(),
+            Date.Today().AddMonths(7)
+        );
+        objQuoteLine1.Free_Months__c = 3;
+        objQuoteLine1.SBQQ__BillingFrequency__c = Null;
+        objQuoteLine1.SBQQ__ChargeType__c = 'Recurring';
+        insert objQuoteLine1;
+        
+        //Contract
+         Contract objContract1 = new Contract(
+            Status = 'Draft',
+            StartDate = objQuote2.SBQQ__StartDate__c,
+            EndDate = objQuote2.SBQQ__EndDate__c,
+            ContractTerm = 7,
+            AccountId = objQuote2.SBQQ__Account__c, //objAccount.Id,
+            SBQQ__Opportunity__c = objQuote2.SBQQ__Opportunity2__c, //objOpportunity.Id,
+            SBQQ__Quote__c = objQuote2.Id
+        );
+    	objContract1.Name = 'Test';
+         insert objContract1;
+        
+        // Order Creation
+        Order objOrder2 = TestDataUtility.createOrder(
+            objAccount1.id,
+            'New',
+            'Draft',
+            Date.today(),
+            Date.today().AddMonths(7),
+            '1',
+            'Net 15',
+            objQuote2.Id,
+            objOpportunity1.Id
+        );
+        insert objOrder2;
+        
+        
+        //dm_OpportunityProducts__c creation 
+        dm_OpportunityProducts__c ObjdmOppProduct1 = new dm_OpportunityProducts__c();
+        ObjdmOppProduct1.OPPORTUNITYID__c = oppId1[0].Id;
+        ObjdmOppProduct1.ACCOUNT_ID_C__c  = accId1[0].Id;
+        ObjdmOppProduct1.START_DATE_C__c = Date.newInstance(2024,08, 01);
+        ObjdmOppProduct1.END_DATE_C__c = date.newInstance(2025,03,31);
+        ObjdmOppProduct1.CONTRACT_ID_NEW_C__c=objContract1.Id;
+        ObjdmOppProduct1.Subscription_Term__c=7;
+        ObjdmOppProduct1.OPPORTUNITY_NAME_C__c = oppId1[0].Name;
+        ObjdmOppProduct1.PRODUCT_NAME_C__c=objProduct2.Name;
+        ObjdmOppProduct1.PC_1_C__c = objProduct2.PC_1__c;
+        ObjdmOppProduct1.TERM_C__c=37;
+        ObjdmOppProduct1.LISTPRICE__c=15750.0000;
+        ObjdmOppProduct1.LICENSE_PRICE_C__c=14000.00;
+        ObjdmOppProduct1.OPPPRODID_C__c=oppId1[0].Id;
+        ObjdmOppProduct1.PRODUCT2ID__c=objProduct2.Id;
+        ObjdmOppProduct1.QUANTITY__c=1.0000;
+        ObjdmOppProduct1.MONTHLY_RECURRING_REVENUE_C__c=400;
+        ObjdmOppProduct1.dm_Opp_Prod_Count_for_Opp__c=1;
+        ObjdmOppProduct1.dm_Product_Name_New__c='Free Months-CPQ';
+        ObjdmOppProduct1.dm_ProductId_New__c=objProduct2.Id;
+        ObjdmOppProduct1.Quote_Temp__c=objQuote2.id;
+        ObjdmOppProduct1.DISCOUNT_AMOUNT_C__c=0.00;
+        ObjdmOppProduct1.TOTALPRICE__c=14000.0000;
+        ObjdmOppProduct1.Opportunity_Temp__c=objOpportunity1.Id;
+
+         insert ObjdmOppProduct1;
+		
+		
+        //dm_Split_ForQLImport__c Creation
+        dm_Split_ForQLImport__c ObjdmSplitforQl1 = new dm_Split_ForQLImport__c();
+        ObjdmSplitforQl1.Quote__c = objQuote3.Id;
+        ObjdmSplitforQl1.Product__c = objProduct2.Id;
+        ObjdmSplitforQl1.Opportunity_Product__c = 'aEb780000004lLBCAY';
+        ObjdmSplitforQl1.SegmentKey__c = 'Ql1';
+        ObjdmSplitforQl1.Number__c = 1;
+        ObjdmSplitforQl1.ChargeType__c = 'Recurring';
+        insert ObjdmSplitforQl1;
+    
+    test.startTest();
+        dm_QLSplitBatchNonAmendmentOppTypes bc = new dm_QLSplitBatchNonAmendmentOppTypes();
+        Id batchId = Database.executeBatch(bc);
+        test.stopTest();
+}
+}
